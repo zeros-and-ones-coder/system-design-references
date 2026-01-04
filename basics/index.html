@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Design Basics - System Design Guide</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-logo">System Design Guide</h1>
+            <button class="menu-toggle" aria-label="Toggle menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <ul class="nav-menu">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../basics/index.html" class="active">Basics</a></li>
+                <li><a href="../kafka/index.html">Kafka</a></li>
+                <li><a href="../microservices/index.html">Microservices</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="breadcrumb">
+            <a href="../index.html">Home</a>
+            <span>/</span>
+            <span>Basics</span>
+        </div>
+
+        <header class="hero">
+            <h1>System Design Basics</h1>
+            <p class="subtitle">Fundamental concepts and building blocks of distributed systems</p>
+        </header>
+
+        <section class="content-section">
+            <h2>Introduction</h2>
+            <p>
+                System design is the process of defining the architecture, components, modules, interfaces, and data
+                for a system to satisfy specified requirements. Understanding the fundamentals is crucial for designing
+                scalable, reliable, and maintainable systems.
+            </p>
+
+            <div class="info-box note">
+                <strong>Note:</strong>
+                These basics form the foundation for understanding distributed systems. Master these concepts before
+                diving into specific technologies.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Core Concepts</h2>
+
+            <button class="collapsible">Scalability</button>
+            <div class="collapsible-content">
+                <h3>What is Scalability?</h3>
+                <p>
+                    Scalability is the capability of a system to handle a growing amount of work by adding resources.
+                    It's about ensuring your system can grow to meet increased demand.
+                </p>
+
+                <h3>Types of Scaling</h3>
+                <ul>
+                    <li><strong>Vertical Scaling (Scale Up):</strong> Adding more power to existing machines (CPU, RAM, Disk)</li>
+                    <li><strong>Horizontal Scaling (Scale Out):</strong> Adding more machines to your pool of resources</li>
+                </ul>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Vertical Scaling</th>
+                            <th>Horizontal Scaling</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Cost</td>
+                            <td>Expensive (powerful machines)</td>
+                            <td>Cost-effective (commodity hardware)</td>
+                        </tr>
+                        <tr>
+                            <td>Complexity</td>
+                            <td>Simple (no code changes)</td>
+                            <td>Complex (requires distribution logic)</td>
+                        </tr>
+                        <tr>
+                            <td>Limit</td>
+                            <td>Hardware limit</td>
+                            <td>Virtually unlimited</td>
+                        </tr>
+                        <tr>
+                            <td>Downtime</td>
+                            <td>Requires downtime</td>
+                            <td>Can be done with zero downtime</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box tip">
+                    <strong>Tip:</strong>
+                    Consider both options and understand when to choose one over the other based on the specific use case.
+                </div>
+            </div>
+
+            <button class="collapsible">Availability & Reliability</button>
+            <div class="collapsible-content">
+                <h3>Availability</h3>
+                <p>
+                    The percentage of time a system is operational and accessible. Usually measured in "nines":
+                </p>
+                <ul>
+                    <li>99% (2 nines) = 3.65 days downtime/year</li>
+                    <li>99.9% (3 nines) = 8.76 hours downtime/year</li>
+                    <li>99.99% (4 nines) = 52.56 minutes downtime/year</li>
+                    <li>99.999% (5 nines) = 5.26 minutes downtime/year</li>
+                </ul>
+
+                <h3>Reliability</h3>
+                <p>
+                    The probability that a system will produce correct outputs up to some given time.
+                    A reliable system is also available, but an available system is not necessarily reliable.
+                </p>
+
+                <div class="info-box important">
+                    <strong>Key Difference:</strong>
+                    An available system responds to requests, but a reliable system responds with correct data.
+                </div>
+            </div>
+
+            <button class="collapsible">Latency vs Throughput</button>
+            <div class="collapsible-content">
+                <h3>Latency</h3>
+                <p>
+                    The time it takes to perform an action or produce a result. Measured in units of time (ms, seconds).
+                </p>
+
+                <h3>Throughput</h3>
+                <p>
+                    The number of operations or requests a system can handle per unit of time.
+                    Measured in operations/second, requests/second, etc.
+                </p>
+
+                <div class="info-box note">
+                    <strong>Analogy:</strong>
+                    Think of a highway - latency is how fast a single car can travel, throughput is how many
+                    cars can pass through in an hour.
+                </div>
+
+                <p><strong>Trade-off:</strong> You generally aim for maximum throughput with acceptable latency.</p>
+            </div>
+
+            <button class="collapsible">CAP Theorem</button>
+            <div class="collapsible-content">
+                <h3>The CAP Theorem</h3>
+                <p>
+                    States that a distributed system can only guarantee 2 out of these 3 properties:
+                </p>
+                <ul>
+                    <li><strong>Consistency:</strong> All nodes see the same data at the same time</li>
+                    <li><strong>Availability:</strong> Every request receives a response (success or failure)</li>
+                    <li><strong>Partition Tolerance:</strong> System continues to operate despite network partitions</li>
+                </ul>
+
+                <h3>Common Choices</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Properties</th>
+                            <th>Example Systems</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>CP</td>
+                            <td>Consistency + Partition Tolerance</td>
+                            <td>MongoDB, HBase, Redis</td>
+                        </tr>
+                        <tr>
+                            <td>AP</td>
+                            <td>Availability + Partition Tolerance</td>
+                            <td>Cassandra, DynamoDB, CouchDB</td>
+                        </tr>
+                        <tr>
+                            <td>CA</td>
+                            <td>Consistency + Availability</td>
+                            <td>PostgreSQL, MySQL (single node)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>Important:</strong>
+                    In practice, you must choose partition tolerance for distributed systems, so the real choice is between CP and AP.
+                </div>
+            </div>
+
+            <button class="collapsible">ACID vs BASE</button>
+            <div class="collapsible-content">
+                <h3>ACID (Traditional Databases)</h3>
+                <ul>
+                    <li><strong>Atomicity:</strong> All or nothing transactions</li>
+                    <li><strong>Consistency:</strong> Data is always in a valid state</li>
+                    <li><strong>Isolation:</strong> Concurrent transactions don't interfere</li>
+                    <li><strong>Durability:</strong> Committed data is never lost</li>
+                </ul>
+
+                <h3>BASE (NoSQL Databases)</h3>
+                <ul>
+                    <li><strong>Basically Available:</strong> System is available most of the time</li>
+                    <li><strong>Soft state:</strong> State may change over time, even without input</li>
+                    <li><strong>Eventual consistency:</strong> System will become consistent over time</li>
+                </ul>
+
+                <div class="info-box tip">
+                    <strong>When to Use:</strong>
+                    Use ACID for financial systems, e-commerce transactions. Use BASE for social media feeds, analytics, caching.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Load Balancing</h2>
+            <p>
+                Distributes incoming network traffic across multiple servers to ensure no single server bears too much load.
+            </p>
+
+            <h3>Load Balancing Algorithms</h3>
+            <ul>
+                <li><strong>Round Robin:</strong> Requests distributed sequentially across servers</li>
+                <li><strong>Least Connections:</strong> Routes to server with fewest active connections</li>
+                <li><strong>IP Hash:</strong> Client IP determines which server receives the request</li>
+                <li><strong>Weighted Round Robin:</strong> Servers with higher weights receive more requests</li>
+                <li><strong>Least Response Time:</strong> Routes to server with fastest response time</li>
+            </ul>
+
+            <div class="info-box note">
+                <strong>Layer 4 vs Layer 7:</strong>
+                L4 operates at transport layer (faster, less context). L7 operates at application layer (slower, more intelligent routing).
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Caching</h2>
+            <p>
+                Storing copies of data in a faster storage layer to reduce latency and load on primary data sources.
+            </p>
+
+            <h3>Caching Strategies</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Strategy</th>
+                        <th>Description</th>
+                        <th>Best For</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Cache Aside</td>
+                        <td>Application manages cache, loads data on miss</td>
+                        <td>Read-heavy workloads</td>
+                    </tr>
+                    <tr>
+                        <td>Write Through</td>
+                        <td>Data written to cache and database simultaneously</td>
+                        <td>Data consistency is critical</td>
+                    </tr>
+                    <tr>
+                        <td>Write Back</td>
+                        <td>Write to cache first, sync to DB asynchronously</td>
+                        <td>Write-heavy workloads</td>
+                    </tr>
+                    <tr>
+                        <td>Refresh Ahead</td>
+                        <td>Automatically refresh cache before expiration</td>
+                        <td>Predictable access patterns</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Cache Eviction Policies</h3>
+            <ul>
+                <li><strong>LRU (Least Recently Used):</strong> Removes least recently accessed items</li>
+                <li><strong>LFU (Least Frequently Used):</strong> Removes least frequently accessed items</li>
+                <li><strong>FIFO (First In First Out):</strong> Removes oldest items first</li>
+                <li><strong>Random Replacement:</strong> Randomly selects items to evict</li>
+            </ul>
+        </section>
+
+        <section class="content-section">
+            <h2>Practical Examples</h2>
+
+            <button class="collapsible">Designing a High-Throughput System (1 Million Requests/Second)</button>
+            <div class="collapsible-content">
+                <p><strong>Key Strategies:</strong></p>
+                <ul>
+                    <li>Use horizontal scaling with load balancers</li>
+                    <li>Implement caching at multiple layers (CDN, application, database)</li>
+                    <li>Use asynchronous processing for non-critical operations</li>
+                    <li>Implement database sharding for data distribution</li>
+                    <li>Use message queues to handle traffic spikes</li>
+                    <li>Consider read replicas for read-heavy workloads</li>
+                </ul>
+            </div>
+
+            <button class="collapsible">SQL vs NoSQL Databases</button>
+            <div class="collapsible-content">
+                <p><strong>SQL (Relational):</strong></p>
+                <ul>
+                    <li>Structured schema with predefined tables</li>
+                    <li>ACID compliant</li>
+                    <li>Vertical scaling primarily</li>
+                    <li>Best for complex queries and transactions</li>
+                    <li>Examples: PostgreSQL, MySQL, Oracle</li>
+                </ul>
+                <p><strong>NoSQL:</strong></p>
+                <ul>
+                    <li>Flexible schema (document, key-value, graph, column)</li>
+                    <li>BASE model (eventual consistency)</li>
+                    <li>Horizontal scaling</li>
+                    <li>Best for high throughput and flexible data</li>
+                    <li>Examples: MongoDB, Cassandra, Redis, DynamoDB</li>
+                </ul>
+            </div>
+
+            <button class="collapsible">Understanding Database Sharding</button>
+            <div class="collapsible-content">
+                <p>
+                    Sharding is a database partitioning technique that splits large databases into smaller,
+                    faster, more manageable parts called shards. Each shard is a separate database instance.
+                </p>
+                <p><strong>Sharding Strategies:</strong></p>
+                <ul>
+                    <li><strong>Hash-based:</strong> Use hash function on a key (e.g., user_id % num_shards)</li>
+                    <li><strong>Range-based:</strong> Partition by ranges (e.g., A-M on shard1, N-Z on shard2)</li>
+                    <li><strong>Geographic:</strong> Partition by location (US users, EU users, etc.)</li>
+                </ul>
+                <p><strong>Challenges:</strong> Cross-shard queries, data distribution, rebalancing</p>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Additional Resources</h2>
+            <ul>
+                <li><a href="https://github.com/donnemartin/system-design-primer" target="_blank">System Design Primer (GitHub)</a></li>
+                <li><a href="https://martinfowler.com/architecture/" target="_blank">Martin Fowler - Software Architecture</a></li>
+                <li><a href="https://aws.amazon.com/architecture/" target="_blank">AWS Architecture Center</a></li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 System Design Reference Guide | Your Personal Learning Resource</p>
+    </footer>
+
+    <script src="../js/main.js"></script>
+</body>
+</html>

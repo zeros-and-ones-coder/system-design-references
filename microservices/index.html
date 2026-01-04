@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Microservices Architecture - System Design Guide</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-logo">System Design Guide</h1>
+            <button class="menu-toggle" aria-label="Toggle menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <ul class="nav-menu">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../basics/index.html">Basics</a></li>
+                <li><a href="../kafka/index.html">Kafka</a></li>
+                <li><a href="../microservices/index.html" class="active">Microservices</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="breadcrumb">
+            <a href="../index.html">Home</a>
+            <span>/</span>
+            <span>Microservices</span>
+        </div>
+
+        <header class="hero">
+            <h1>Microservices Architecture</h1>
+            <p class="subtitle">Building scalable, maintainable distributed systems with independent services</p>
+        </header>
+
+        <section class="content-section">
+            <h2>What are Microservices?</h2>
+            <p>
+                Microservices is an architectural style that structures an application as a collection of small,
+                autonomous services modeled around a business domain. Each service is self-contained, independently
+                deployable, and communicates through well-defined APIs.
+            </p>
+
+            <div class="info-box note">
+                <strong>Key Principle:</strong>
+                Each microservice should be focused on doing one thing well (Single Responsibility Principle).
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Microservices vs Monolith</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Aspect</th>
+                        <th>Monolithic</th>
+                        <th>Microservices</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Structure</td>
+                        <td>Single codebase</td>
+                        <td>Multiple independent services</td>
+                    </tr>
+                    <tr>
+                        <td>Deployment</td>
+                        <td>Deploy entire application</td>
+                        <td>Deploy services independently</td>
+                    </tr>
+                    <tr>
+                        <td>Scaling</td>
+                        <td>Scale entire application</td>
+                        <td>Scale individual services</td>
+                    </tr>
+                    <tr>
+                        <td>Technology</td>
+                        <td>Single tech stack</td>
+                        <td>Different stack per service</td>
+                    </tr>
+                    <tr>
+                        <td>Development</td>
+                        <td>Simple to develop initially</td>
+                        <td>Complex distributed system</td>
+                    </tr>
+                    <tr>
+                        <td>Failure Impact</td>
+                        <td>Single point of failure</td>
+                        <td>Isolated failures</td>
+                    </tr>
+                    <tr>
+                        <td>Best For</td>
+                        <td>Small teams, simple apps</td>
+                        <td>Large teams, complex apps</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="info-box warning">
+                <strong>Don't Start with Microservices:</strong>
+                Consider starting with a monolith and breaking it into microservices as you understand the domain better.
+                Premature microservices can lead to unnecessary complexity.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Core Concepts</h2>
+
+            <button class="collapsible">Service Communication</button>
+            <div class="collapsible-content">
+                <h3>Synchronous Communication</h3>
+                <p><strong>REST APIs (HTTP/HTTPS)</strong></p>
+                <ul>
+                    <li>Simple and widely understood</li>
+                    <li>Easy to test and debug</li>
+                    <li>Tight coupling between services</li>
+                    <li>Services must be available simultaneously</li>
+                </ul>
+
+                <p><strong>gRPC</strong></p>
+                <ul>
+                    <li>High performance with Protocol Buffers</li>
+                    <li>Supports streaming</li>
+                    <li>Strong typing and contract</li>
+                    <li>Better for service-to-service communication</li>
+                </ul>
+
+                <h3>Asynchronous Communication</h3>
+                <p><strong>Message Queues (RabbitMQ, AWS SQS)</strong></p>
+                <ul>
+                    <li>Decouples services</li>
+                    <li>Services don't need to be online simultaneously</li>
+                    <li>Built-in retry mechanisms</li>
+                    <li>Better fault tolerance</li>
+                </ul>
+
+                <p><strong>Event Streaming (Kafka)</strong></p>
+                <ul>
+                    <li>Event-driven architecture</li>
+                    <li>Message replay capability</li>
+                    <li>High throughput</li>
+                    <li>Multiple consumers can process same events</li>
+                </ul>
+
+                <div class="info-box tip">
+                    <strong>Tip:</strong>
+                    Use synchronous communication for simple request-response patterns, asynchronous for long-running tasks and event-driven workflows.
+                </div>
+            </div>
+
+            <button class="collapsible">API Gateway</button>
+            <div class="collapsible-content">
+                <h3>What is an API Gateway?</h3>
+                <p>
+                    A single entry point for all client requests that routes them to appropriate microservices.
+                    Acts as a reverse proxy.
+                </p>
+
+                <h3>Responsibilities</h3>
+                <ul>
+                    <li><strong>Routing:</strong> Direct requests to correct microservice</li>
+                    <li><strong>Authentication & Authorization:</strong> Centralized security</li>
+                    <li><strong>Rate Limiting:</strong> Prevent abuse and overload</li>
+                    <li><strong>Load Balancing:</strong> Distribute traffic across instances</li>
+                    <li><strong>Request/Response Transformation:</strong> Adapt protocols</li>
+                    <li><strong>Caching:</strong> Reduce backend load</li>
+                    <li><strong>Monitoring & Logging:</strong> Centralized observability</li>
+                </ul>
+
+                <div class="info-box note">
+                    <strong>Popular API Gateways:</strong>
+                    Kong, AWS API Gateway, Azure API Management, NGINX, Traefik
+                </div>
+
+                <h3>Backend for Frontend (BFF) Pattern</h3>
+                <p>
+                    Create separate API gateways for different client types (web, mobile, IoT).
+                    Each BFF is optimized for its specific client's needs.
+                </p>
+            </div>
+
+            <button class="collapsible">Service Discovery</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    In a dynamic microservices environment, service instances come and go. How do services
+                    find each other without hardcoding IP addresses?
+                </p>
+
+                <h3>Solution: Service Registry</h3>
+                <p>
+                    A database of available service instances and their locations.
+                </p>
+
+                <h3>Discovery Patterns</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Pattern</th>
+                            <th>Description</th>
+                            <th>Examples</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Client-Side</td>
+                            <td>Client queries registry and chooses instance</td>
+                            <td>Netflix Eureka</td>
+                        </tr>
+                        <tr>
+                            <td>Server-Side</td>
+                            <td>Load balancer queries registry</td>
+                            <td>AWS ELB, Kubernetes</td>
+                        </tr>
+                        <tr>
+                            <td>DNS-Based</td>
+                            <td>DNS returns multiple IPs for a service</td>
+                            <td>Consul DNS</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box important">
+                    <strong>Popular Tools:</strong>
+                    Consul, Eureka, etcd, ZooKeeper, Kubernetes (built-in)
+                </div>
+            </div>
+
+            <button class="collapsible">Circuit Breaker Pattern</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    When a service fails, other services calling it shouldn't keep trying and waste resources.
+                    Cascading failures can bring down the entire system.
+                </p>
+
+                <h3>Circuit Breaker States</h3>
+                <ul>
+                    <li><strong>Closed:</strong> Normal operation, requests flow through</li>
+                    <li><strong>Open:</strong> Service is failing, requests fail fast without calling the service</li>
+                    <li><strong>Half-Open:</strong> Limited requests allowed to test if service has recovered</li>
+                </ul>
+
+                <pre><code>// Pseudocode example
+if (circuitBreaker.isOpen()) {
+    return fallbackResponse();
+}
+
+try {
+    response = callService();
+    circuitBreaker.recordSuccess();
+    return response;
+} catch (Exception e) {
+    circuitBreaker.recordFailure();
+    return fallbackResponse();
+}</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Implementation:</strong>
+                    Use libraries like Netflix Hystrix (deprecated), Resilience4j, or Polly (.NET)
+                </div>
+            </div>
+
+            <button class="collapsible">Data Management</button>
+            <div class="collapsible-content">
+                <h3>Database per Service Pattern</h3>
+                <p>
+                    Each microservice has its own database. Services cannot directly access other services' databases.
+                </p>
+
+                <h3>Benefits</h3>
+                <ul>
+                    <li>Loose coupling - services are independent</li>
+                    <li>Choose optimal database for each service</li>
+                    <li>Easier to scale services independently</li>
+                </ul>
+
+                <h3>Challenges</h3>
+                <ul>
+                    <li><strong>Data Consistency:</strong> No ACID transactions across services</li>
+                    <li><strong>Joins:</strong> Cannot join data across databases</li>
+                    <li><strong>Data Duplication:</strong> Some data may be replicated</li>
+                </ul>
+
+                <h3>Solutions</h3>
+
+                <p><strong>1. Saga Pattern (for distributed transactions)</strong></p>
+                <ul>
+                    <li><strong>Choreography:</strong> Each service publishes events, others listen and react</li>
+                    <li><strong>Orchestration:</strong> Central orchestrator tells services what to do</li>
+                </ul>
+
+                <p><strong>2. CQRS (Command Query Responsibility Segregation)</strong></p>
+                <ul>
+                    <li>Separate models for reading and writing data</li>
+                    <li>Write model handles commands, read model handles queries</li>
+                    <li>Often combined with Event Sourcing</li>
+                </ul>
+
+                <p><strong>3. Event Sourcing</strong></p>
+                <ul>
+                    <li>Store all changes as events, not just current state</li>
+                    <li>Rebuild state by replaying events</li>
+                    <li>Perfect audit trail</li>
+                </ul>
+
+                <div class="info-box warning">
+                    <strong>Trade-off:</strong>
+                    Database per service adds complexity. Only use when benefits (scalability, independence) outweigh costs.
+                </div>
+            </div>
+
+            <button class="collapsible">Authentication & Authorization</button>
+            <div class="collapsible-content">
+                <h3>Common Approaches</h3>
+
+                <p><strong>1. Centralized Authentication (API Gateway)</strong></p>
+                <ul>
+                    <li>Gateway handles auth, passes user info to services</li>
+                    <li>Services trust the gateway</li>
+                    <li>Simple for services but single point of failure</li>
+                </ul>
+
+                <p><strong>2. Token-Based (JWT)</strong></p>
+                <ul>
+                    <li>Auth service issues JWT tokens</li>
+                    <li>Token contains user claims</li>
+                    <li>Services validate token independently</li>
+                    <li>No need to call auth service for every request</li>
+                </ul>
+
+                <pre><code>// JWT token flow
+1. Client -> Auth Service: Login credentials
+2. Auth Service -> Client: JWT token
+3. Client -> API Gateway: Request + JWT
+4. API Gateway -> Microservice: Request + JWT
+5. Microservice: Validates JWT and processes request</code></pre>
+
+                <p><strong>3. OAuth 2.0 / OpenID Connect</strong></p>
+                <ul>
+                    <li>Industry standard for authorization</li>
+                    <li>Supports third-party authentication (Google, GitHub, etc.)</li>
+                    <li>Access tokens with limited scope and expiration</li>
+                </ul>
+
+                <div class="info-box important">
+                    <strong>Best Practice:</strong>
+                    Use short-lived access tokens with refresh tokens. Implement token revocation for security.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Common Patterns</h2>
+
+            <h3>Strangler Fig Pattern</h3>
+            <p>
+                Gradually migrate from monolith to microservices by replacing functionality piece by piece.
+                New features go to microservices, old ones stay in monolith until migrated.
+            </p>
+
+            <h3>Bulkhead Pattern</h3>
+            <p>
+                Isolate resources (threads, connections, memory) for different services to prevent one failing
+                service from exhausting resources needed by others.
+            </p>
+
+            <h3>Sidecar Pattern</h3>
+            <p>
+                Deploy helper components alongside your service in the same host/pod.
+                Common for logging, monitoring, service mesh (like Istio).
+            </p>
+
+            <h3>Retry Pattern</h3>
+            <p>
+                Automatically retry failed requests with exponential backoff and jitter.
+                Essential for handling transient failures in distributed systems.
+            </p>
+
+            <pre><code>// Exponential backoff with jitter
+initialDelay = 100ms
+maxRetries = 5
+
+for (attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+        return callService();
+    } catch (Exception e) {
+        delay = initialDelay * (2 ^ attempt) + random(0, 100);
+        sleep(delay);
+    }
+}</code></pre>
+        </section>
+
+        <section class="content-section">
+            <h2>Observability</h2>
+
+            <h3>The Three Pillars</h3>
+
+            <p><strong>1. Logging</strong></p>
+            <ul>
+                <li>Centralized logging (ELK Stack, Splunk, CloudWatch)</li>
+                <li>Structured logging (JSON format)</li>
+                <li>Correlation IDs to trace requests across services</li>
+            </ul>
+
+            <p><strong>2. Metrics</strong></p>
+            <ul>
+                <li>System metrics (CPU, memory, disk)</li>
+                <li>Application metrics (request rate, latency, errors)</li>
+                <li>Business metrics (orders, signups, revenue)</li>
+                <li>Tools: Prometheus, Grafana, DataDog, New Relic</li>
+            </ul>
+
+            <p><strong>3. Distributed Tracing</strong></p>
+            <ul>
+                <li>Track requests as they flow through multiple services</li>
+                <li>Identify bottlenecks and failures</li>
+                <li>Tools: Jaeger, Zipkin, AWS X-Ray, OpenTelemetry</li>
+            </ul>
+
+            <div class="info-box tip">
+                <strong>Correlation ID:</strong>
+                Generate a unique ID for each request and pass it through all services. Makes debugging much easier.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Deployment Strategies</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Strategy</th>
+                        <th>Description</th>
+                        <th>Risk</th>
+                        <th>Rollback</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Rolling Update</td>
+                        <td>Gradually replace instances</td>
+                        <td>Medium</td>
+                        <td>Slow</td>
+                    </tr>
+                    <tr>
+                        <td>Blue-Green</td>
+                        <td>Two identical environments, switch traffic</td>
+                        <td>Low</td>
+                        <td>Instant</td>
+                    </tr>
+                    <tr>
+                        <td>Canary</td>
+                        <td>Deploy to small subset first</td>
+                        <td>Very Low</td>
+                        <td>Fast</td>
+                    </tr>
+                    <tr>
+                        <td>Feature Flags</td>
+                        <td>Deploy code, enable features selectively</td>
+                        <td>Very Low</td>
+                        <td>Instant</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="content-section">
+            <h2>Key Decision Points</h2>
+
+            <button class="collapsible">Choosing Between Microservices and Monolith</button>
+            <div class="collapsible-content">
+                <p><strong>Microservices are suitable when:</strong></p>
+                <ul>
+                    <li>Large team that needs to work independently</li>
+                    <li>Different parts of system have different scaling needs</li>
+                    <li>Need to use different technologies for different components</li>
+                    <li>Frequent deployments and rapid iteration required</li>
+                    <li>System is complex with well-defined bounded contexts</li>
+                </ul>
+                <p><strong>Monolith is suitable when:</strong></p>
+                <ul>
+                    <li>Small team</li>
+                    <li>Simple application</li>
+                    <li>Starting a new product (validate first, then split if needed)</li>
+                    <li>Limited DevOps resources</li>
+                </ul>
+            </div>
+
+            <button class="collapsible">Handling Distributed Transactions</button>
+            <div class="collapsible-content">
+                <p>Use the <strong>Saga Pattern</strong>:</p>
+                <ol>
+                    <li><strong>Choreography:</strong> Each service publishes events after completing its transaction. Other services listen and execute their transactions. If any fails, compensating transactions rollback changes.</li>
+                    <li><strong>Orchestration:</strong> A central orchestrator service coordinates the transaction across services. It tells each service what to do and handles rollbacks.</li>
+                </ol>
+                <p><strong>Example (Order Processing):</strong></p>
+                <pre><code>1. Order Service: Create order (pending)
+2. Payment Service: Reserve payment
+   - Success: Continue
+   - Failure: Cancel order
+3. Inventory Service: Reserve items
+   - Success: Continue
+   - Failure: Refund payment, cancel order
+4. Shipping Service: Create shipment
+   - Success: Complete order
+   - Failure: Return items, refund payment, cancel order</code></pre>
+            </div>
+
+            <button class="collapsible">Preventing Cascading Failures</button>
+            <div class="collapsible-content">
+                <p><strong>Resilience Strategies:</strong></p>
+                <ul>
+                    <li><strong>Circuit Breaker:</strong> Stop calling failing services</li>
+                    <li><strong>Timeouts:</strong> Don't wait forever for responses</li>
+                    <li><strong>Bulkhead:</strong> Isolate resources per service</li>
+                    <li><strong>Rate Limiting:</strong> Prevent overwhelming services</li>
+                    <li><strong>Graceful Degradation:</strong> Provide fallback responses</li>
+                    <li><strong>Health Checks:</strong> Remove unhealthy instances from load balancer</li>
+                    <li><strong>Retry with Backoff:</strong> Don't hammer failing services</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Best Practices</h2>
+            <ol>
+                <li><strong>Design for Failure:</strong> Assume services will fail and design accordingly</li>
+                <li><strong>One Service, One Responsibility:</strong> Keep services focused and cohesive</li>
+                <li><strong>Decentralize:</strong> Avoid single points of failure</li>
+                <li><strong>Automate Everything:</strong> CI/CD, testing, deployment, monitoring</li>
+                <li><strong>API Versioning:</strong> Never break backward compatibility</li>
+                <li><strong>Idempotency:</strong> Make operations safe to retry</li>
+                <li><strong>Security:</strong> Encrypt in transit and at rest, authenticate all requests</li>
+                <li><strong>Document APIs:</strong> Use tools like Swagger/OpenAPI</li>
+            </ol>
+        </section>
+
+        <section class="content-section">
+            <h2>Additional Resources</h2>
+            <ul>
+                <li><a href="https://microservices.io/" target="_blank">Microservices.io - Patterns Catalog</a></li>
+                <li><a href="https://martinfowler.com/microservices/" target="_blank">Martin Fowler - Microservices</a></li>
+                <li><a href="https://12factor.net/" target="_blank">The Twelve-Factor App</a></li>
+                <li><a href="https://www.nginx.com/blog/introduction-to-microservices/" target="_blank">NGINX - Introduction to Microservices</a></li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 System Design Reference Guide | Your Personal Learning Resource</p>
+    </footer>
+
+    <script src="../js/main.js"></script>
+</body>
+</html>

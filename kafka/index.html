@@ -1,0 +1,2426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apache Kafka - Production Architecture & Operations</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-logo">System Design Guide</h1>
+            <button class="menu-toggle" aria-label="Toggle menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <ul class="nav-menu">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../basics/index.html">Basics</a></li>
+                <li><a href="../kafka/index.html" class="active">Kafka</a></li>
+                <li><a href="../microservices/index.html">Microservices</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="breadcrumb">
+            <a href="../index.html">Home</a>
+            <span>/</span>
+            <span>Kafka</span>
+        </div>
+
+        <header class="hero">
+            <h1>Apache Kafka at Scale</h1>
+            <p class="subtitle">Production architecture, operational excellence, and advanced patterns for distributed event streaming</p>
+        </header>
+
+        <section class="content-section">
+            <h2>Introduction: Kafka in Production</h2>
+            <p>
+                Apache Kafka has evolved from a LinkedIn messaging system to the de facto standard for event streaming at scale.
+                This guide focuses on production deployment, operational challenges, performance optimization, and architectural
+                patterns observed in systems processing billions of events per day.
+            </p>
+
+            <div class="info-box note">
+                <strong>Scope:</strong>
+                This documentation assumes familiarity with Kafka fundamentals and focuses on production operations,
+                scaling strategies, failure scenarios, and architectural decision-making for large-scale deployments.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Production Architecture Patterns</h2>
+
+            <button class="collapsible">Multi-Tier Topic Architecture</button>
+            <div class="collapsible-content">
+                <h3>Tiered Topics for Reliability and Performance</h3>
+                <p>
+                    In production, segregating topics by criticality, latency requirements, and retention policies
+                    prevents resource contention and allows independent scaling.
+                </p>
+
+                <h4>Common Tier Structure:</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Tier</th>
+                            <th>Characteristics</th>
+                            <th>Configuration</th>
+                            <th>Use Cases</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Critical Path</td>
+                            <td>min.insync.replicas=2<br>acks=all<br>Low retention</td>
+                            <td>RF=3, 50+ partitions<br>Dedicated brokers</td>
+                            <td>Financial transactions, order processing</td>
+                        </tr>
+                        <tr>
+                            <td>High Throughput</td>
+                            <td>acks=1<br>Compression: lz4<br>Medium retention</td>
+                            <td>RF=3, 100+ partitions<br>Shared infrastructure</td>
+                            <td>Clickstream, metrics, logs</td>
+                        </tr>
+                        <tr>
+                            <td>Analytical</td>
+                            <td>acks=1<br>Compression: zstd<br>Long retention (30+ days)</td>
+                            <td>RF=3, Tiered storage<br>Slower disks acceptable</td>
+                            <td>Data lake ingestion, batch analytics</td>
+                        </tr>
+                        <tr>
+                            <td>Dead Letter Queue</td>
+                            <td>acks=all<br>Long retention<br>Low throughput</td>
+                            <td>RF=3, Few partitions<br>Alerts on writes</td>
+                            <td>Failed message handling, debugging</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box important">
+                    <strong>Production Lesson:</strong>
+                    Mixing high-throughput analytics topics with low-latency critical topics on same brokers causes
+                    page cache eviction and GC pressure. Isolate workloads either via dedicated clusters or broker racks
+                    with partition assignment constraints.
+                </div>
+
+                <h4>Partition Count Strategy</h4>
+                <pre><code>// Partition count calculation for target throughput
+desired_throughput = 500 MB/s (target)
+producer_throughput_per_partition = 10 MB/s
+consumer_throughput_per_partition = 20 MB/s
+
+// Producer-limited
+partitions_needed_producer = 500 / 10 = 50
+
+// Consumer-limited (often the bottleneck)
+partitions_needed_consumer = 500 / 20 = 25
+
+// Add headroom for: consumer rebalancing, broker failures, traffic spikes
+recommended_partitions = max(50, 25) * 2 = 100 partitions
+
+// Constraint: max partitions per broker typically 2000-4000
+// For 100 partitions with RF=3: need at least 1 broker (300 partition-replicas)</code></pre>
+
+                <div class="info-box warning">
+                    <strong>Over-partitioning Costs:</strong>
+                    Each partition consumes file handles, memory for index, and network connections.
+                    10,000+ partitions per broker increases rebalance time, leader election latency, and ZooKeeper load.
+                    Prefer scaling brokers over excessive partitions.
+                </div>
+            </div>
+
+            <button class="collapsible">Multi-Datacenter Deployments</button>
+            <div class="collapsible-content">
+                <h3>Active-Active vs Active-Passive Patterns</h3>
+
+                <h4>Pattern 1: Stretch Cluster (Active-Active)</h4>
+                <p>
+                    Single Kafka cluster spanning multiple DCs with rack awareness. Provides consistency but high latency.
+                </p>
+                <pre><code>// Broker configuration for rack awareness
+broker.rack=us-east-1a
+replica.selector.class=org.apache.kafka.common.replica.RackAwareReplicaSelector
+
+// Topic configuration
+min.insync.replicas=2  // At least one replica in each DC
+unclean.leader.election.enable=false  // No data loss tolerance</code></pre>
+
+                <p><strong>Challenges:</strong></p>
+                <ul>
+                    <li>Cross-DC latency (50-100ms) impacts producer acks=all performance</li>
+                    <li>Network partition can cause split-brain if majority of brokers isolated</li>
+                    <li>ZooKeeper quorum must survive DC loss (requires 3+ DCs or external ZK cluster)</li>
+                </ul>
+
+                <h4>Pattern 2: MirrorMaker 2 (Active-Passive or Active-Active)</h4>
+                <p>
+                    Separate clusters per region with asynchronous replication. Better latency, eventual consistency.
+                </p>
+                <pre><code>// MirrorMaker 2 configuration for bidirectional replication
+clusters = primary, secondary
+primary.bootstrap.servers = primary-cluster:9092
+secondary.bootstrap.servers = secondary-cluster:9092
+
+primary->secondary.enabled = true
+secondary->primary.enabled = true  // For active-active
+
+// Conflict resolution via timestamp or custom logic
+primary->secondary.replication.policy.class = CustomReplicationPolicy
+
+// Selective topic replication
+topics = orders.*, payments.*
+topics.blacklist = .*internal.*</code></pre>
+
+                <p><strong>Operational Considerations:</strong></p>
+                <ul>
+                    <li><strong>Lag monitoring:</strong> MM2 lag indicates DR readiness; alert on lag > 10 seconds</li>
+                    <li><strong>Duplicate handling:</strong> Consumers must be idempotent for active-active scenarios</li>
+                    <li><strong>Failover strategy:</strong> DNS switching vs application-level routing</li>
+                    <li><strong>Offset translation:</strong> MM2 maintains offset mapping, but manual intervention needed for precise resumption</li>
+                </ul>
+
+                <div class="info-box tip">
+                    <strong>Production Pattern:</strong>
+                    Use stretch cluster for critical, low-volume topics (orders, transactions) where consistency matters.
+                    Use MM2 for high-volume analytics topics where eventual consistency acceptable. Hybrid approach
+                    balances latency and durability requirements.
+                </div>
+            </div>
+
+            <button class="collapsible">KRaft Mode: ZooKeeper Removal</button>
+            <div class="collapsible-content">
+                <h3>Migrating to KRaft in Production</h3>
+                <p>
+                    Kafka 3.3+ supports KRaft (Kafka Raft) for metadata management, eliminating ZooKeeper dependency.
+                    Production migration requires careful planning.
+                </p>
+
+                <h4>KRaft Architecture</h4>
+                <ul>
+                    <li><strong>Quorum Controllers:</strong> Dedicated brokers (or combined mode) run Raft consensus</li>
+                    <li><strong>Metadata log:</strong> Replicated topic (__cluster_metadata) stores cluster state</li>
+                    <li><strong>Faster operations:</strong> Partition leader elections in milliseconds vs seconds (ZK)</li>
+                    <li><strong>Scalability:</strong> Supports 1M+ partitions per cluster (vs ~200K with ZK)</li>
+                </ul>
+
+                <h4>Migration Strategy (Kafka 3.6+)</h4>
+                <pre><code>// Phase 1: Dual-write mode - KRaft controllers shadow ZooKeeper
+# Enable migration in server.properties
+zookeeper.metadata.migration.enable=true
+controller.quorum.voters=1@controller1:9093,2@controller2:9093,3@controller3:9093
+
+// Phase 2: Finalize migration
+kafka-metadata.sh --snapshot /tmp/migration --bootstrap-server localhost:9092
+
+// Phase 3: Remove ZooKeeper dependencies
+# Remove from server.properties:
+# zookeeper.connect=...
+
+// Rollback capability exists until finalization</code></pre>
+
+                <div class="info-box warning">
+                    <strong>Production Gotchas:</strong>
+                    KRaft mode incompatible with JBOD configurations in Kafka 3.x. Requires all brokers on same version.
+                    Test extensively in staging - metadata corruption requires cluster rebuild. Monitoring tools (Cruise Control,
+                    Burrow) may need updates for KRaft compatibility.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Operational Challenges & Mitigations</h2>
+
+            <button class="collapsible">Handling Poison Pills and Consumer Failures</button>
+            <div class="collapsible-content">
+                <h3>The Poison Pill Problem</h3>
+                <p>
+                    A single malformed message can halt an entire consumer group if not handled properly. In production,
+                    this can cascade across dependent systems.
+                </p>
+
+                <h4>Mitigation Strategies</h4>
+
+                <p><strong>1. Skip Offset Pattern (Tactical)</strong></p>
+                <pre><code>// Manual offset manipulation to skip poison pill
+// Use with extreme caution - data loss risk
+try {
+    processRecord(record);
+} catch (UnrecoverableException e) {
+    log.error("Poison pill detected", record, e);
+
+    // Alert ops team
+    alerting.sendCritical("Poison pill in topic", metadata);
+
+    // Store to DLQ for later analysis
+    dlqProducer.send(new ProducerRecord<>(DLQ_TOPIC, record));
+
+    // Seek past the poison pill
+    consumer.seek(
+        new TopicPartition(record.topic(), record.partition()),
+        record.offset() + 1
+    );
+}</code></pre>
+
+                <p><strong>2. Dead Letter Queue with Retry Logic</strong></p>
+                <pre><code>// Production-grade DLQ with exponential backoff
+class ResilientConsumer {
+    private int maxRetries = 3;
+
+    void processWithRetry(ConsumerRecord record) {
+        int attempt = getAttemptCount(record);  // From headers
+
+        try {
+            businessLogic.process(record);
+            commitOffset(record);
+        } catch (RetriableException e) {
+            if (attempt < maxRetries) {
+                // Send to retry topic with backoff
+                long delayMs = (long) Math.pow(2, attempt) * 1000;
+                scheduleRetry(record, delayMs, attempt + 1);
+            } else {
+                // Exhausted retries, send to DLQ
+                sendToDLQ(record, e);
+            }
+            commitOffset(record);  // Move on regardless
+        } catch (NonRetriableException e) {
+            sendToDLQ(record, e);
+            commitOffset(record);
+        }
+    }
+}</code></pre>
+
+                <p><strong>3. Circuit Breaker for Downstream Dependencies</strong></p>
+                <pre><code>// Prevent cascading failures when downstream service fails
+CircuitBreaker cb = CircuitBreaker.builder()
+    .failureRateThreshold(50)  // Open if 50% fail
+    .waitDurationInOpenState(Duration.ofSeconds(30))
+    .slidingWindowSize(100)
+    .build();
+
+void processRecord(ConsumerRecord record) {
+    Try.ofSupplier(
+        CircuitBreaker.decorateSupplier(cb, () -> {
+            return downstreamService.process(record.value());
+        })
+    ).onFailure(throwable -> {
+        if (throwable instanceof CallNotPermittedException) {
+            // Circuit open - send to retry queue
+            scheduleRetry(record, 30000);
+        } else {
+            // Downstream failure - retry or DLQ
+            handleFailure(record, throwable);
+        }
+    });
+}</code></pre>
+
+                <div class="info-box important">
+                    <strong>Production Observation:</strong>
+                    Poison pills often arise from schema evolution mismatches. Implement strict schema validation
+                    at producer side using Schema Registry with compatibility checks. A single bad deploy can create
+                    millions of poison pills.
+                </div>
+            </div>
+
+            <button class="collapsible">Downstream API Failures: DLQ Overflow Scenario</button>
+            <div class="collapsible-content">
+                <h3>The Problem: API Outage Floods DLQ</h3>
+                <p>
+                    <strong>Scenario:</strong> Your consumer reads 10K msgs/sec from Kafka, calling an external API for each event.
+                    API goes down for 30 minutes. All 18 million messages fail and flood the DLQ, overwhelming storage,
+                    creating massive backlog, and making genuine poison pills impossible to find.
+                </p>
+
+                <div class="info-box warning">
+                    <strong>Why This is Different from Poison Pills:</strong>
+                    Poison pills are individual bad messages. API outages are systemic failures affecting ALL messages.
+                    Treating them the same creates operational disasters.
+                </div>
+
+                <h4>Anti-Pattern: Naive DLQ Implementation</h4>
+                <pre><code>// DON'T DO THIS
+void processRecord(ConsumerRecord record) {
+    try {
+        apiClient.call(record.value());  // API down = throws exception
+        consumer.commitSync();
+    } catch (Exception e) {
+        dlqProducer.send(new ProducerRecord<>(DLQ_TOPIC, record));
+        consumer.commitSync();  // Move on
+    }
+}
+
+// Problem: 30-minute outage at 10K msgs/sec = 18M DLQ messages
+// DLQ topic grows to 18GB, processing DLQ takes hours after recovery
+// Genuine poison pills buried in noise</code></pre>
+
+                <h4>Solution 1: Circuit Breaker with Consumer Pause</h4>
+                <p>
+                    When downstream API fails, stop consuming from Kafka entirely. Let messages accumulate in Kafka
+                    (designed for this), not DLQ.
+                </p>
+
+                <pre><code>class ResilientAPIConsumer {
+    private CircuitBreaker circuitBreaker;
+    private KafkaConsumer consumer;
+    private AtomicBoolean isPaused = new AtomicBoolean(false);
+
+    ResilientAPIConsumer() {
+        this.circuitBreaker = CircuitBreaker.builder()
+            .failureRateThreshold(50)  // Open if 50% of calls fail
+            .slidingWindowSize(100)     // Over last 100 requests
+            .waitDurationInOpenState(Duration.ofMinutes(2))  // Wait 2 min before retry
+            .permittedNumberOfCallsInHalfOpenState(10)  // Test with 10 calls
+            .automaticTransitionFromOpenToHalfOpenEnabled(true)
+            .build();
+
+        // Listen to circuit breaker state changes
+        circuitBreaker.getEventPublisher()
+            .onStateTransition(event -> handleCircuitBreakerStateChange(event));
+    }
+
+    void consume() {
+        while (true) {
+            if (circuitBreaker.getState() == CircuitBreaker.State.OPEN && !isPaused.get()) {
+                // API is down - pause Kafka consumption
+                consumer.pause(consumer.assignment());
+                isPaused.set(true);
+                log.warn("Circuit OPEN - paused Kafka consumption. Lag will increase.");
+                alerting.sendAlert("Consumer paused due to API failure", WARN);
+            }
+
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+
+            for (ConsumerRecord<String, String> record : records) {
+                processWithCircuitBreaker(record);
+            }
+        }
+    }
+
+    void processWithCircuitBreaker(ConsumerRecord record) {
+        try {
+            CircuitBreaker.decorateRunnable(circuitBreaker, () -> {
+                apiClient.call(record.value());
+            }).run();
+
+            consumer.commitSync();  // Success
+
+        } catch (CallNotPermittedException e) {
+            // Circuit is OPEN - consumer should already be paused
+            // This shouldn't happen, but handle gracefully
+            log.debug("Circuit open, skipping record temporarily");
+
+        } catch (Exception e) {
+            // Genuine failure (circuit not yet open, or transient error)
+            handleFailure(record, e);
+        }
+    }
+
+    void handleCircuitBreakerStateChange(CircuitBreakerOnStateTransitionEvent event) {
+        if (event.getStateTransition().getToState() == CircuitBreaker.State.HALF_OPEN) {
+            // Resume consumption to test recovery
+            consumer.resume(consumer.assignment());
+            isPaused.set(false);
+            log.info("Circuit HALF_OPEN - resumed Kafka consumption for testing");
+
+        } else if (event.getStateTransition().getToState() == CircuitBreaker.State.CLOSED) {
+            // API recovered - ensure consumption resumed
+            consumer.resume(consumer.assignment());
+            isPaused.set(false);
+            log.info("Circuit CLOSED - API recovered, normal consumption resumed");
+            alerting.sendAlert("Consumer resumed, API healthy", INFO);
+        }
+    }
+
+    void handleFailure(ConsumerRecord record, Exception e) {
+        // Only send to DLQ if circuit is CLOSED (not systemic failure)
+        if (circuitBreaker.getState() == CircuitBreaker.State.CLOSED) {
+            // Could be poison pill - send to DLQ
+            dlqProducer.send(new ProducerRecord<>(DLQ_TOPIC, record));
+            log.error("Individual message failed (not API outage), sent to DLQ", e);
+        }
+        consumer.commitSync();  // Move on regardless
+    }
+}</code></pre>
+
+                <h4>Benefits of Circuit Breaker + Pause Pattern</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Without Circuit Breaker</th>
+                            <th>With Circuit Breaker</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>DLQ messages (30 min outage)</td>
+                            <td>18 million</td>
+                            <td>~100 (before circuit opens)</td>
+                        </tr>
+                        <tr>
+                            <td>Consumer lag</td>
+                            <td>0 (moved to DLQ)</td>
+                            <td>18M (in Kafka, designed for this)</td>
+                        </tr>
+                        <tr>
+                            <td>Recovery time</td>
+                            <td>Hours (reprocess DLQ)</td>
+                            <td>Minutes (resume from lag)</td>
+                        </tr>
+                        <tr>
+                            <td>Wasted API calls</td>
+                            <td>18 million failures</td>
+                            <td>~100 failures + 10 retries</td>
+                        </tr>
+                        <tr>
+                            <td>Poison pill visibility</td>
+                            <td>Buried in 18M messages</td>
+                            <td>Clear signal in DLQ</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Solution 2: Exponential Backoff with Bounded DLQ</h4>
+                <p>
+                    If you can't pause consumption (e.g., multi-consumer group, different downstream systems),
+                    use exponential backoff and DLQ rate limiting.
+                </p>
+
+                <pre><code>class BackoffConsumer {
+    private static final int MAX_RETRIES = 5;
+    private static final long MAX_BACKOFF_MS = 300000;  // 5 minutes
+    private RateLimiter dlqRateLimiter = RateLimiter.create(10.0);  // Max 10 DLQ msgs/sec
+
+    void processRecord(ConsumerRecord record) {
+        int attempt = getAttemptCount(record);  // Read from header
+
+        try {
+            apiClient.call(record.value());
+            consumer.commitSync();
+
+        } catch (ApiException e) {
+            if (attempt < MAX_RETRIES) {
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                long backoffMs = Math.min(
+                    (long) Math.pow(2, attempt) * 1000,
+                    MAX_BACKOFF_MS
+                );
+
+                // Add jitter to prevent thundering herd
+                long jitter = ThreadLocalRandom.current().nextLong(0, backoffMs / 10);
+                long delayMs = backoffMs + jitter;
+
+                // Send to retry topic with delay
+                scheduleRetry(record, delayMs, attempt + 1);
+                log.info("Retrying message after {}ms (attempt {})", delayMs, attempt + 1);
+
+            } else {
+                // Exhausted retries - send to DLQ with rate limiting
+                sendToDLQWithRateLimit(record, e);
+            }
+
+            consumer.commitSync();
+        }
+    }
+
+    void scheduleRetry(ConsumerRecord record, long delayMs, int nextAttempt) {
+        // Add delay timestamp and attempt count to headers
+        Headers headers = new RecordHeaders();
+        headers.add("retry-timestamp",
+            ByteBuffer.allocate(8).putLong(System.currentTimeMillis() + delayMs).array());
+        headers.add("attempt-count",
+            ByteBuffer.allocate(4).putInt(nextAttempt).array());
+
+        ProducerRecord retryRecord = new ProducerRecord<>(
+            RETRY_TOPIC,  // Separate retry topic
+            null,  // partition
+            record.key(),
+            record.value(),
+            headers
+        );
+
+        retryProducer.send(retryRecord);
+    }
+
+    void sendToDLQWithRateLimit(ConsumerRecord record, Exception e) {
+        // Rate limit DLQ writes to prevent overflow during outages
+        if (dlqRateLimiter.tryAcquire()) {
+            dlqProducer.send(new ProducerRecord<>(DLQ_TOPIC, record));
+            log.error("Message sent to DLQ after {} retries", MAX_RETRIES, e);
+        } else {
+            // DLQ rate limit exceeded - this is likely systemic failure
+            log.error("DLQ rate limit exceeded - potential API outage. Message dropped!", e);
+            metrics.increment("dlq.rate_limited.count");
+
+            // Alert ops team - likely need to pause consumer manually
+            if (metrics.get("dlq.rate_limited.count") > 100) {
+                alerting.sendCritical("Possible API outage - DLQ rate limit hit 100x");
+            }
+        }
+    }
+}
+
+// Retry topic consumer - processes delayed retries
+class RetryConsumer {
+    void consume() {
+        while (true) {
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+
+            for (ConsumerRecord<String, String> record : records) {
+                long retryTimestamp = getRetryTimestamp(record);
+                long now = System.currentTimeMillis();
+
+                if (now < retryTimestamp) {
+                    // Not ready yet - seek back and wait
+                    consumer.seek(
+                        new TopicPartition(record.topic(), record.partition()),
+                        record.offset()
+                    );
+                    Thread.sleep(retryTimestamp - now);
+                } else {
+                    // Ready to retry - send back to main topic
+                    mainProducer.send(new ProducerRecord<>(MAIN_TOPIC, record));
+                    consumer.commitSync();
+                }
+            }
+        }
+    }
+}</code></pre>
+
+                <h4>Solution 3: Adaptive Consumer with Health Checks</h4>
+                <p>
+                    Proactively check API health before processing messages.
+                </p>
+
+                <pre><code>class HealthCheckConsumer {
+    private volatile boolean apiHealthy = true;
+    private ScheduledExecutorService healthCheckExecutor = Executors.newScheduledThreadPool(1);
+
+    HealthCheckConsumer() {
+        // Health check every 10 seconds
+        healthCheckExecutor.scheduleAtFixedRate(
+            this::checkApiHealth,
+            0,
+            10,
+            TimeUnit.SECONDS
+        );
+    }
+
+    void checkApiHealth() {
+        try {
+            // Lightweight health check endpoint
+            Response response = apiClient.healthCheck();
+
+            if (response.isSuccess()) {
+                if (!apiHealthy) {
+                    log.info("API recovered - resuming consumption");
+                    consumer.resume(consumer.assignment());
+                }
+                apiHealthy = true;
+            } else {
+                handleApiUnhealthy();
+            }
+        } catch (Exception e) {
+            handleApiUnhealthy();
+        }
+    }
+
+    void handleApiUnhealthy() {
+        if (apiHealthy) {
+            log.warn("API health check failed - pausing consumption");
+            consumer.pause(consumer.assignment());
+            alerting.sendAlert("Consumer paused - API unhealthy", WARN);
+        }
+        apiHealthy = false;
+    }
+
+    void consume() {
+        while (true) {
+            if (!apiHealthy) {
+                // API unhealthy - skip polling to avoid timeouts
+                Thread.sleep(1000);
+                continue;
+            }
+
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+            // Process normally...
+        }
+    }
+}</code></pre>
+
+                <h4>Decision Matrix: Which Strategy to Use?</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Scenario</th>
+                            <th>Strategy</th>
+                            <th>Rationale</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Single consumer group, dedicated API</td>
+                            <td>Circuit Breaker + Pause</td>
+                            <td>Simplest, most effective</td>
+                        </tr>
+                        <tr>
+                            <td>Multiple consumer groups, shared API</td>
+                            <td>Exponential Backoff + Rate-Limited DLQ</td>
+                            <td>Can't pause all consumers</td>
+                        </tr>
+                        <tr>
+                            <td>Frequent short outages (&lt; 1 min)</td>
+                            <td>Exponential Backoff</td>
+                            <td>Recovers without intervention</td>
+                        </tr>
+                        <tr>
+                            <td>Long outages (hours), planned maintenance</td>
+                            <td>Health Check + Pause</td>
+                            <td>Proactive, avoids failures</td>
+                        </tr>
+                        <tr>
+                            <td>Mixed failure modes (API + poison pills)</td>
+                            <td>Circuit Breaker + DLQ for CLOSED state</td>
+                            <td>Distinguishes systemic vs individual failures</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Operational Runbook for API Outages</h4>
+                <pre><code>// 1. Detection (automated alerting)
+Alert: "Consumer lag increasing" (Kafka lag > 100K)
+Alert: "DLQ write rate spike" (DLQ > 100 msgs/sec)
+Alert: "API error rate high" (HTTP 5xx > 10%)
+
+// 2. Diagnosis
+$ kafka-consumer-groups.sh --describe --group api-consumer
+# Check lag trend - if increasing rapidly, likely API issue
+
+$ curl https://api.example.com/health
+# Verify API status
+
+// 3. Immediate Action (if API down)
+# Option A: Pause consumer (if circuit breaker not implemented)
+$ kafka-consumer-groups.sh --reset-offsets --group api-consumer \
+    --to-current --execute  # Note current offset
+# Kill consumer application
+# Wait for API recovery
+
+# Option B: Scale down consumers to reduce API load
+$ kubectl scale deployment api-consumer --replicas=1
+
+// 4. Post-Recovery
+# Resume consumer (if paused)
+$ # Restart consumer application - will resume from last commit
+
+# Check DLQ size
+$ kafka-run-class.sh kafka.tools.GetOffsetShell \
+    --broker-list localhost:9092 --topic api-dlq
+
+# If DLQ has < 1000 messages: process manually
+# If DLQ has > 10K messages: likely systemic, investigate before reprocessing
+
+// 5. Prevent Recurrence
+# Implement circuit breaker if not present
+# Add API health monitoring
+# Set up auto-scaling based on lag metrics</code></pre>
+
+                <div class="info-box important">
+                    <strong>Production Learning:</strong>
+                    The worst DLQ scenario: 2-hour API outage sends 72M messages to DLQ. DLQ topic grows to 200GB.
+                    Processing DLQ at 1K msgs/sec takes 20 hours. During DLQ processing, API has another outage.
+                    <strong>Lesson:</strong> DLQ should only contain genuine poison pills (dozens to hundreds of messages).
+                    Use circuit breakers and pausing for systemic failures.
+                </div>
+
+                <h4>Metrics to Monitor</h4>
+                <pre><code>// Consumer-side metrics
+consumer.lag.messages          // Kafka lag (expect spike during outage)
+consumer.pause.duration.ms     // Time consumer was paused
+api.call.error.rate            // % of API calls failing
+dlq.write.rate                 // DLQ messages per second
+
+// Alerting rules
+WARN:  consumer.lag > 100K AND api.error.rate > 25%
+CRITICAL: dlq.write.rate > 100/sec for > 1 minute
+CRITICAL: consumer.pause.duration.ms > 10 minutes
+
+// Dashboard: Show correlation
+- Consumer lag (line chart)
+- API error rate (line chart, overlay on same chart)
+- DLQ write rate (bar chart)
+// Operator should immediately see: lag up + API errors up = expected behavior</code></pre>
+            </div>
+
+            <button class="collapsible">Hot Partition Problem: Uneven Load Distribution</button>
+            <div class="collapsible-content">
+                <h3>The Problem: One Partition Gets 80% of Traffic</h3>
+                <p>
+                    <strong>Scenario:</strong> You have a topic with 100 partitions and 100 consumers (1:1 mapping).
+                    Total throughput is 500K msgs/sec. One consumer is processing 400K msgs/sec while others handle 1-2K msgs/sec.
+                    That consumer has 50M message lag while others are at 0. The hot partition's consumer crashes from
+                    memory pressure, triggering rebalances, and the problem repeats.
+                </p>
+
+                <div class="info-box warning">
+                    <strong>Why This Happens:</strong>
+                    Hot partitions occur when your partitioning key has skewed distribution. Common culprits:
+                    tenant IDs (one huge customer), user IDs (celebrity accounts), device IDs (popular IoT gateway),
+                    geographic regions (all traffic from US-East).
+                </div>
+
+                <h4>Root Cause Analysis</h4>
+
+                <p><strong>1. Partitioning by Skewed Key</strong></p>
+                <pre><code>// Example: Multi-tenant SaaS platform
+// Key: tenantId
+producer.send(new ProducerRecord<>(
+    "user-events",
+    tenantId,      // 80% of events from tenant "acme-corp"
+    eventData
+));
+
+// Hash-based partitioning: hash(tenantId) % 100
+// If tenant "acme-corp" hashes to partition 42:
+// - Partition 42: 400K msgs/sec (80% of traffic)
+// - Other 99 partitions: 1K msgs/sec each
+
+// Root cause: Pareto distribution (80/20 rule) in tenant sizes</code></pre>
+
+                <p><strong>2. Null Keys Concentrating to Single Partition</strong></p>
+                <pre><code>// All null keys go to same partition (implementation dependent)
+producer.send(new ProducerRecord<>(
+    "logs",
+    null,          // No key = random partition, but sticky partitioner!
+    logMessage
+));
+
+// Kafka's StickyPartitioner (default since 2.4):
+// - Batches messages without keys to same partition until batch full
+// - Can cause temporary hot partitions during traffic spikes
+// - Improves throughput but creates imbalance</code></pre>
+
+                <p><strong>3. Time-Based Traffic Patterns</strong></p>
+                <pre><code>// Partitioning by timestamp causes hot partitions during high traffic
+// Example: E-commerce site partitions orders by hour
+String hourKey = Instant.now().truncatedTo(ChronoUnit.HOURS).toString();
+
+// Problem: 9 PM (peak shopping) all traffic goes to partition for 21:00
+// Other hours' partitions idle
+// Not truly a "hot partition" but temporal hotspot</code></pre>
+
+                <h4>Detection Strategies</h4>
+
+                <p><strong>Method 1: Partition-Level Lag Monitoring</strong></p>
+                <pre><code>// Check per-partition lag, not just consumer group lag
+$ kafka-consumer-groups.sh --describe --group user-events-processor
+
+GROUP           TOPIC       PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+events-processor user-events 0          1000000        1000050         50
+events-processor user-events 1          1000000        1000030         30
+events-processor user-events 42         500000         50000000        49500000  ⚠️ HOT
+events-processor user-events 99         1000000        1000020         20
+
+// Partition 42 has 49.5M lag while others have < 100
+// Clear hot partition indicator</code></pre>
+
+                <p><strong>Method 2: Broker Disk Usage Imbalance</strong></p>
+                <pre><code>// Hot partitions cause uneven disk usage across brokers
+$ du -sh /data/kafka-logs/user-events-*
+
+500M    /data/kafka-logs/user-events-0
+480M    /data/kafka-logs/user-events-1
+125G    /data/kafka-logs/user-events-42  ⚠️ 250x larger
+490M    /data/kafka-logs/user-events-99
+
+// If partition is leader on this broker, also check:
+// - CPU usage (serialization/compression)
+// - Network egress (replication + consumers)
+// - Disk IOPS (write amplification)</code></pre>
+
+                <p><strong>Method 3: Key Distribution Analysis</strong></p>
+                <pre><code>// Analyze key distribution in topic
+// Custom tool or kcat (kafkacat)
+$ kcat -C -b localhost:9092 -t user-events -f '%k\n' \
+    -o beginning -c 1000000 | sort | uniq -c | sort -rn | head -20
+
+4500000 acme-corp        ⚠️ 45% of traffic
+3200000 megacorp         ⚠️ 32%
+150000 startup-inc
+100000 small-biz
+...
+
+// Top 2 tenants = 77% of traffic
+// This will create hot partitions</code></pre>
+
+                <h4>Solution 1: Salting the Partition Key</h4>
+                <p>
+                    Add random suffix to hot keys to distribute across multiple partitions. Trade-off: Loses strict
+                    ordering for that key.
+                </p>
+
+                <pre><code>class SaltedPartitioningProducer {
+    private static final int SALT_RANGE = 10;  // Spread across 10 partitions
+    private Set<String> hotTenants = Set.of("acme-corp", "megacorp");
+
+    String computePartitionKey(String tenantId, String userId) {
+        if (hotTenants.contains(tenantId)) {
+            // Salt hot tenants across 10 partitions
+            int salt = Math.abs(userId.hashCode()) % SALT_RANGE;
+            return tenantId + "-" + salt;
+            // acme-corp → acme-corp-0, acme-corp-1, ..., acme-corp-9
+        } else {
+            // Small tenants: no salting, preserve ordering
+            return tenantId;
+        }
+    }
+
+    void produce(String tenantId, String userId, Event event) {
+        String key = computePartitionKey(tenantId, userId);
+        producer.send(new ProducerRecord<>("user-events", key, event));
+    }
+}
+
+// Result: acme-corp traffic (400K msgs/sec) spread across 10 partitions = 40K each
+// Still higher than average (1K/sec) but manageable
+
+// Consumer-side: Must aggregate data from multiple partitions for same tenant</code></pre>
+
+                <h4>Solution 2: Custom Partitioner for Weighted Distribution</h4>
+                <p>
+                    Implement custom partitioner that assigns more partitions to hot keys.
+                </p>
+
+                <pre><code>public class WeightedPartitioner implements Partitioner {
+    private Map<String, Integer> tenantWeights;  // tenant → partition count
+    private Map<String, List<Integer>> tenantPartitions = new HashMap<>();
+
+    @Override
+    public void configure(Map<String, ?> configs) {
+        // Load tenant weights from config or external service
+        // acme-corp: 40 partitions, megacorp: 30, others: 1 each
+        tenantWeights = loadTenantWeights();
+
+        // Assign partition ranges to tenants
+        int partitionIndex = 0;
+        for (Map.Entry<String, Integer> entry : tenantWeights.entrySet()) {
+            String tenant = entry.getKey();
+            int count = entry.getValue();
+
+            List<Integer> partitions = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                partitions.add(partitionIndex++);
+            }
+            tenantPartitions.put(tenant, partitions);
+        }
+    }
+
+    @Override
+    public int partition(String topic, Object key, byte[] keyBytes,
+                        Object value, byte[] valueBytes, Cluster cluster) {
+        String tenantId = extractTenantId(key);
+        List<Integer> assignedPartitions = tenantPartitions.get(tenantId);
+
+        if (assignedPartitions == null || assignedPartitions.isEmpty()) {
+            // Unknown tenant - use default partitioning
+            return Math.abs(key.hashCode()) % cluster.partitionCountForTopic(topic);
+        }
+
+        // Round-robin within assigned partitions
+        int index = Math.abs(key.hashCode()) % assignedPartitions.size();
+        return assignedPartitions.get(index);
+    }
+}
+
+// Topic configuration: 100 partitions
+// Partition assignment:
+//   acme-corp: partitions 0-39 (40 partitions, 400K msgs/sec → 10K/partition)
+//   megacorp: partitions 40-69 (30 partitions, 320K msgs/sec → 10.6K/partition)
+//   others: partitions 70-99 (30 partitions shared, 280K total → ~9K/partition)
+
+// Balanced: All partitions now ~10K msgs/sec</code></pre>
+
+                <h4>Solution 3: Dedicated Topics for Hot Tenants</h4>
+                <p>
+                    Create separate topics for hot tenants with their own partition strategy.
+                </p>
+
+                <pre><code>class MultiTopicProducer {
+    private Map<String, String> tenantTopicMapping;
+
+    MultiTopicProducer() {
+        tenantTopicMapping = Map.of(
+            "acme-corp", "user-events-acme",      // Dedicated topic, 50 partitions
+            "megacorp", "user-events-megacorp",   // Dedicated topic, 40 partitions
+            "default", "user-events-shared"       // Shared topic, 100 partitions
+        );
+    }
+
+    void produce(String tenantId, Event event) {
+        String topic = tenantTopicMapping.getOrDefault(tenantId, "user-events-shared");
+
+        // Use user ID as key for per-user ordering within tenant
+        producer.send(new ProducerRecord<>(topic, event.userId, event));
+    }
+}
+
+// Consumer groups:
+//   - acme-events-processor: 50 consumers, dedicated to acme-corp topic
+//   - megacorp-events-processor: 40 consumers, dedicated to megacorp
+//   - shared-events-processor: 100 consumers for all other tenants
+
+// Benefits:
+//   - Complete isolation (hot tenant can't impact others)
+//   - Independent scaling (can scale acme consumers without affecting others)
+//   - Per-tenant SLAs (acme gets faster processing)
+
+// Drawbacks:
+//   - Operational overhead (managing multiple topics)
+//   - Resource fragmentation (dedicated consumer groups)
+//   - Complexity in routing logic</code></pre>
+
+                <h4>Solution 4: Dynamic Repartitioning (Advanced)</h4>
+                <p>
+                    Detect hot partitions in real-time and redistribute load. Requires application-level logic.
+                </p>
+
+                <pre><code>// Architecture: Two-stage partitioning
+// Stage 1: Kafka topic with 100 partitions (intake)
+// Stage 2: Consumer redistributes to 1000 virtual partitions (processing)
+
+class RepartitioningConsumer {
+    private static final int VIRTUAL_PARTITIONS = 1000;
+    private KafkaConsumer<String, Event> intakeConsumer;
+    private KafkaProducer<String, Event> processingProducer;
+
+    void consume() {
+        while (true) {
+            ConsumerRecords<String, Event> records = intakeConsumer.poll(Duration.ofMillis(100));
+
+            for (ConsumerRecord<String, Event> record : records) {
+                // Original key: tenantId (skewed distribution)
+                String tenantId = record.key();
+
+                // New key: hash of tenantId + userId (uniform distribution)
+                String newKey = tenantId + ":" + record.value().userId;
+                int virtualPartition = Math.abs(newKey.hashCode()) % VIRTUAL_PARTITIONS;
+
+                // Produce to processing topic with virtual partition
+                processingProducer.send(new ProducerRecord<>(
+                    "user-events-processing",
+                    virtualPartition,  // Explicit partition
+                    newKey,
+                    record.value()
+                ));
+            }
+
+            intakeConsumer.commitSync();
+        }
+    }
+}
+
+// Result:
+//   - Intake topic: 100 partitions, may have hotspots (don't care, just intake)
+//   - Processing topic: 1000 partitions, uniform distribution
+//   - Can scale processing consumers to 1000 (vs 100 with hot partitions)
+
+// Trade-off: Added latency (extra hop), operational complexity (two topics)</code></pre>
+
+                <h4>Solution 5: Partition Splitting (Kafka Improvement Proposal)</h4>
+                <p>
+                    Split hot partitions into multiple partitions. Currently requires topic recreation in production Kafka.
+                </p>
+
+                <pre><code>// Current limitation: Kafka doesn't support splitting existing partitions
+// Workaround: Create new topic with more partitions, migrate data
+
+// Step 1: Create new topic with 2x partitions
+$ kafka-topics.sh --create --topic user-events-v2 \
+    --partitions 200 --replication-factor 3
+
+// Step 2: Dual-write to both topics (from producers)
+producer.send(new ProducerRecord<>("user-events", key, value));
+producer.send(new ProducerRecord<>("user-events-v2", key, value));
+
+// Step 3: Migrate consumers to new topic
+// Step 4: Deprecate old topic after retention expires
+
+// Future: KIP-694 proposes dynamic partition splitting
+// Would allow splitting partition 42 → 42a, 42b, 42c without downtime</code></pre>
+
+                <h4>Comparison of Solutions</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Solution</th>
+                            <th>Complexity</th>
+                            <th>Ordering Preservation</th>
+                            <th>When to Use</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Salting</td>
+                            <td>Low</td>
+                            <td>Lost for hot keys only</td>
+                            <td>Few hot keys, ordering not critical</td>
+                        </tr>
+                        <tr>
+                            <td>Custom Partitioner</td>
+                            <td>Medium</td>
+                            <td>Preserved</td>
+                            <td>Known hot keys, can pre-assign partitions</td>
+                        </tr>
+                        <tr>
+                            <td>Dedicated Topics</td>
+                            <td>High</td>
+                            <td>Preserved</td>
+                            <td>Very hot tenants, need isolation</td>
+                        </tr>
+                        <tr>
+                            <td>Repartitioning</td>
+                            <td>Very High</td>
+                            <td>Configurable</td>
+                            <td>Dynamic hotspots, need flexibility</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Prevention: Design for Uniform Distribution</h4>
+
+                <p><strong>1. Composite Keys</strong></p>
+                <pre><code>// Bad: Single-dimension key
+String key = tenantId;  // Skewed
+
+// Good: Multi-dimension key
+String key = tenantId + ":" + userId;  // More uniform
+String key = tenantId + ":" + deviceId + ":" + timestamp;  // Even better</code></pre>
+
+                <p><strong>2. Capacity Planning for Skew</strong></p>
+                <pre><code>// Don't assume uniform distribution when sizing partitions
+// Rule of thumb: Design for 10:1 skew ratio
+
+target_throughput_per_partition = 10,000 msgs/sec
+max_tenant_throughput = 400,000 msgs/sec
+
+// Naive calculation (assuming uniform):
+partitions_needed = max_tenant_throughput / target_per_partition = 40
+
+// Realistic calculation (accounting for skew):
+// If largest tenant is 10x average, need 10x more partitions
+partitions_needed = 40 * 10 = 400 partitions
+
+// Ensure largest tenant traffic fits in single consumer's capacity
+// Or use salting/custom partitioner</code></pre>
+
+                <p><strong>3. Monitoring and Alerting</strong></p>
+                <pre><code>// Metrics to track
+partition.lag.max / partition.lag.avg > 10  // One partition 10x lagging
+partition.bytes.in.rate.max / partition.bytes.in.rate.avg > 5  // Hotspot
+consumer.cpu.usage variance > 50%  // Uneven consumer load
+
+// Automated alerting
+if (maxPartitionLag > 10 * avgPartitionLag) {
+    alert("Hot partition detected on topic " + topic + " partition " + partition);
+    // Include: top keys in that partition, byte rate, consumer assignment
+}
+
+// Grafana dashboard: Heatmap of partition lag across all partitions
+// Visual pattern: One or few partitions consistently darker = hot partition</code></pre>
+
+                <h4>Real-World Case Study: E-commerce Platform</h4>
+                <pre><code>// Problem:
+// - 10K sellers on platform
+// - Top 10 sellers = 60% of order volume
+// - Topic: "orders" (100 partitions, key = sellerId)
+// - Partition for Amazon-like seller: 600K orders/day
+// - Other partitions: 1-2K orders/day
+// - Consumer assigned to hot partition crashes from memory
+
+// Investigation:
+$ kafka-consumer-groups.sh --describe --group order-processor
+// Partition 73: 5M lag (hot)
+// Other partitions: < 1K lag
+
+// Key analysis:
+$ kcat -C -b localhost:9092 -t orders -f '%k\n' | sort | uniq -c | sort -rn
+// 600000 seller-12345  ← Mega seller
+// 580000 seller-67890
+// 550000 seller-11111
+// ...
+
+// Solution implemented: Hybrid approach
+1. Top 50 sellers → Dedicated topics (orders-seller-{id})
+   - 50 topics × 10 partitions each = 500 partitions total
+   - Dedicated consumer groups per seller
+
+2. Long tail (9950 sellers) → Shared topic with salting
+   - orders-shared (200 partitions)
+   - Key: sellerId + (orderId % 5)  // Salt by order ID
+   - Preserves ordering per order, not per seller (acceptable)
+
+// Result:
+   - Max partition lag: 10K (vs 5M before)
+   - All consumers balanced CPU 60-70% (vs 5% or 100%)
+   - No more crashes, lag under control</code></pre>
+
+                <div class="info-box important">
+                    <strong>Key Takeaway:</strong>
+                    Hot partitions are symptoms of poor partitioning key choice. Fix the root cause (key design)
+                    rather than treating symptoms (adding more partitions). Consider data distribution early in
+                    design phase - retrofitting is painful. Monitor partition-level metrics, not just topic-level.
+                </div>
+            </div>
+
+            <button class="collapsible">Rebalancing Storms and Consumer Group Stability</button>
+            <div class="collapsible-content">
+                <h3>Understanding Rebalance Pathologies</h3>
+                <p>
+                    Rebalances are unavoidable but excessive rebalancing causes processing delays, duplicate processing,
+                    and cascade failures. At scale, rebalance storms can take hours to stabilize.
+                </p>
+
+                <h4>Common Rebalance Triggers</h4>
+                <ul>
+                    <li><strong>Long GC pauses:</strong> Consumer misses heartbeat (session.timeout.ms expired)</li>
+                    <li><strong>Slow processing:</strong> Exceeds max.poll.interval.ms without committing</li>
+                    <li><strong>Network partitions:</strong> Consumer disconnected from coordinator</li>
+                    <li><strong>Rolling deployments:</strong> Pods/instances restarting</li>
+                    <li><strong>Autoscaling:</strong> Consumers joining/leaving dynamically</li>
+                </ul>
+
+                <h4>Tuning for Stability</h4>
+                <pre><code>// Production-tested consumer configuration
+Properties props = new Properties();
+
+// Heartbeat tuning
+props.put("session.timeout.ms", "30000");  // 30s - high enough for GC pauses
+props.put("heartbeat.interval.ms", "3000");  // 10% of session timeout
+props.put("max.poll.interval.ms", "600000");  // 10 minutes for slow processing
+
+// Rebalance protocol (use incremental for large groups)
+props.put("partition.assignment.strategy",
+    "org.apache.kafka.clients.consumer.CooperativeStickyAssignor");
+
+// Fetch tuning to prevent poll timeout
+props.put("max.poll.records", "100");  // Reduce if processing is slow
+props.put("fetch.min.bytes", "1048576");  // 1MB - batch fetches
+props.put("fetch.max.wait.ms", "500");  // Don't wait too long
+
+// Connection stability
+props.put("connections.max.idle.ms", "540000");  // 9 minutes
+props.put("request.timeout.ms", "30000");</code></pre>
+
+                <h4>Cooperative Rebalancing (Incremental)</h4>
+                <p>
+                    Default eager rebalancing stops all consumers during rebalance. Cooperative rebalancing
+                    (introduced Kafka 2.4) only revokes/assigns changed partitions.
+                </p>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Eager Rebalance</th>
+                            <th>Cooperative Rebalance</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Stop-the-world pause</td>
+                            <td>100% of partitions</td>
+                            <td>Only reassigned partitions (~10-20%)</td>
+                        </tr>
+                        <tr>
+                            <td>Rebalance duration (100 partitions)</td>
+                            <td>10-30 seconds</td>
+                            <td>2-5 seconds</td>
+                        </tr>
+                        <tr>
+                            <td>Lag spike impact</td>
+                            <td>Severe</td>
+                            <td>Minimal</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Static Group Membership</h4>
+                <p>
+                    For containerized deployments with stable pod names, use static membership to prevent
+                    rebalances on pod restarts.
+                </p>
+                <pre><code>// Set stable group.instance.id per consumer
+props.put("group.instance.id", podName);  // e.g., "consumer-pod-0"
+
+// Benefit: During rolling restart, Kafka waits session.timeout.ms
+// before triggering rebalance, allowing pod to rejoin with same partitions</code></pre>
+
+                <div class="info-box warning">
+                    <strong>Rebalance Storm Scenario:</strong>
+                    100 consumers in a group, processing takes 2 minutes per batch. One consumer GCs for 35s,
+                    triggering rebalance. All consumers stop, commit offsets, rejoin. During rejoin, another consumer
+                    times out. Cascading rebalances ensue. <strong>Solution:</strong> Increase session.timeout.ms to 60s,
+                    reduce max.poll.records to ensure processing &lt; max.poll.interval.ms.
+                </div>
+            </div>
+
+            <button class="collapsible">Disk Failures and Data Corruption</button>
+            <div class="collapsible-content">
+                <h3>Handling Broker Disk Failures</h3>
+                <p>
+                    Disk failures are inevitable at scale. Proper RAID configuration, monitoring, and recovery
+                    procedures minimize data loss and downtime.
+                </p>
+
+                <h4>Failure Scenarios</h4>
+
+                <p><strong>1. Single Disk Failure (JBOD mode)</strong></p>
+                <ul>
+                    <li>Kafka marks affected log directories as offline</li>
+                    <li>Partitions on failed disk become unavailable on that broker</li>
+                    <li>If ISR contains other replicas, leadership transfers automatically</li>
+                    <li><strong>Action:</strong> Replace disk, restart broker, Kafka replicates from leader</li>
+                </ul>
+
+                <p><strong>2. Checksum Mismatch / Corruption</strong></p>
+                <pre><code>// Broker logs show:
+[ERROR] Found invalid messages in log segment /data/topic-0/00000000000123456789.log
+org.apache.kafka.common.errors.CorruptRecordException: Record is corrupt
+
+// Recovery procedure:
+1. Stop broker
+2. Delete corrupted segment: rm /data/topic-0/00000000000123456789.log
+3. Restart broker - will replicate from leader
+4. Verify: kafka-log-dirs.sh --describe --bootstrap-server localhost:9092</code></pre>
+
+                <p><strong>3. Complete Broker Loss</strong></p>
+                <pre><code>// Scenario: Broker hardware failure, non-recoverable
+// Pre-requisite: min.insync.replicas=2, replication.factor=3
+
+1. Remove broker from cluster (graceful):
+   kafka-reassign-partitions.sh --generate --broker-list 1,2,4,5 \
+       --topics-to-move-json-file topics.json
+
+2. Execute reassignment to move leaders off dead broker:
+   kafka-reassign-partitions.sh --execute --reassignment-json-file reassignment.json
+
+3. Wait for completion (hours for TB of data):
+   kafka-reassign-partitions.sh --verify
+
+4. Decommission broker from monitoring, load balancers
+
+// Time to recovery (1TB data, 100MB/s replication):
+// 1TB / 100MB/s = ~2.8 hours per replica</code></pre>
+
+                <div class="info-box important">
+                    <strong>Production Pattern:</strong>
+                    Use RAID-10 for broker storage (not RAID-5/6 - write penalty). Maintain spare broker capacity
+                    (N+2 or N+3) to handle simultaneous failures. Monitor disk S.M.A.R.T. metrics proactively -
+                    replace disks showing early failure signs before they fail.
+                </div>
+
+                <h4>Unclean Leader Election Trade-offs</h4>
+                <pre><code>// Default: unclean.leader.election.enable=false (prefer availability over consistency)
+// When all ISR replicas fail, partition becomes unavailable
+
+// Option 1: Enable unclean election (risk data loss)
+unclean.leader.election.enable=true
+// Out-of-sync replica becomes leader, truncates to its position
+// Data loss: messages not replicated to this follower are lost
+
+// Option 2: Wait for ISR replica to recover
+// Partition offline until original ISR member returns
+// No data loss, but availability impact</code></pre>
+
+                <p><strong>Decision Matrix:</strong></p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Use Case</th>
+                            <th>unclean.leader.election</th>
+                            <th>Rationale</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Financial transactions</td>
+                            <td>false</td>
+                            <td>Data loss unacceptable</td>
+                        </tr>
+                        <tr>
+                            <td>Clickstream analytics</td>
+                            <td>true</td>
+                            <td>Availability > completeness</td>
+                        </tr>
+                        <tr>
+                            <td>System metrics</td>
+                            <td>true</td>
+                            <td>Missing data tolerable</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <button class="collapsible">Message Ordering Violations at Scale</button>
+            <div class="collapsible-content">
+                <h3>When Ordering Breaks Down</h3>
+                <p>
+                    Kafka guarantees ordering within a partition, but production systems face scenarios where
+                    this guarantee is insufficient or violated.
+                </p>
+
+                <h4>Scenario 1: Producer Retries with Idempotence Disabled</h4>
+                <pre><code>// Without idempotence:
+// Batch 1: [msg1, msg2, msg3] - network timeout, retried
+// Batch 2: [msg4, msg5] - succeeds first
+// Result in partition: [msg4, msg5, msg1, msg2, msg3] - OUT OF ORDER!
+
+// Solution: Enable idempotence (default in Kafka 3.0+)
+props.put("enable.idempotence", "true");
+// Idempotence ensures: retries preserve order, exactly-once within partition</code></pre>
+
+                <h4>Scenario 2: Multi-Partition Topics with Key Distribution Skew</h4>
+                <pre><code>// Problem: 80% of traffic has same key (e.g., "global" tenant)
+// All messages route to partition 0, underutilizing other partitions
+// Single consumer handles 80% of load
+
+// Solution 1: Composite keying
+String key = tenantId + ":" + (userId % 10);  // Spread within tenant
+
+// Solution 2: Custom partitioner with salting
+public class SaltedPartitioner implements Partitioner {
+    public int partition(String topic, Object key, byte[] keyBytes, ...) {
+        String saltedKey = key + ":" + ThreadLocalRandom.current().nextInt(10);
+        return Utils.toPositive(Utils.murmur2(saltedKey.getBytes())) % numPartitions;
+    }
+}
+// Trade-off: Loses strict ordering for hot keys, gains parallelism</code></pre>
+
+                <h4>Scenario 3: Consumer Processing Out of Order (Async)</h4>
+                <pre><code>// Anti-pattern: Async processing with auto-commit
+consumer.poll().forEach(record -> {
+    executor.submit(() -> process(record));  // Async, may complete out of order
+});
+consumer.commitSync();  // Commits offset before processing completes!
+
+// If consumer crashes, messages may not be processed, or processed twice
+
+// Solution: Synchronous processing or manual offset management
+Map<TopicPartition, OffsetAndMetadata> offsets = new ConcurrentHashMap<>();
+for (ConsumerRecord record : consumer.poll()) {
+    CompletableFuture.supplyAsync(() -> process(record), executor)
+        .thenAccept(result -> {
+            offsets.put(
+                new TopicPartition(record.topic(), record.partition()),
+                new OffsetAndMetadata(record.offset() + 1)
+            );
+        });
+}
+// Periodically commit the lowest contiguous offset per partition
+consumer.commitSync(calculateContiguousOffsets(offsets));</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Architectural Pattern:</strong>
+                    For strict ordering requirements (e.g., state machine events), use single partition topics
+                    with idempotent producers. For high throughput with relaxed ordering, use multi-partition topics
+                    with consumer-side sequencing (version numbers, timestamps) or eventual consistency models.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Performance Tuning & Capacity Planning</h2>
+
+            <button class="collapsible">Broker Performance Optimization</button>
+            <div class="collapsible-content">
+                <h3>Bottleneck Identification</h3>
+                <p>
+                    Production Kafka clusters hit different bottlenecks depending on workload: CPU (compression),
+                    disk I/O (writes), network (replication), or memory (page cache).
+                </p>
+
+                <h4>Disk Subsystem Tuning</h4>
+                <pre><code>// Filesystem: XFS recommended over ext4
+// Mount options for data directory
+/dev/nvme0n1 /data xfs noatime,nodiratime,nobarrier,discard 0 0
+
+// Linux kernel tuning
+vm.swappiness=1  // Minimize swap usage
+vm.dirty_ratio=80  // Flush dirty pages at 80%
+vm.dirty_background_ratio=5  // Background flush at 5%
+vm.dirty_expire_centisecs=12000  // 2 minutes
+
+// IO scheduler: Use none/noop for NVMe, deadline for SSD
+echo none > /sys/block/nvme0n1/queue/scheduler</code></pre>
+
+                <h4>JVM Tuning for Brokers</h4>
+                <pre><code>// Heap sizing: 4-8GB typical (more doesn't help - Kafka relies on page cache)
+KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+
+// G1GC configuration (default in Java 9+)
+KAFKA_JVM_PERFORMANCE_OPTS="
+    -XX:+UseG1GC
+    -XX:MaxGCPauseMillis=20  // Target pause time
+    -XX:InitiatingHeapOccupancyPercent=35  // GC threshold
+    -XX:G1ReservePercent=20  // Reserve for promotion
+
+    // Logging
+    -Xlog:gc*:file=/var/log/kafka/gc.log:time,uptime:filecount=10,filesize=100M
+
+    // Prevent OOM on heap exhaustion
+    -XX:+ExitOnOutOfMemoryError
+"
+
+// Off-heap for network buffers (not part of heap)
+// Allocated via socket.send.buffer.bytes, socket.receive.buffer.bytes</code></pre>
+
+                <h4>Network Tuning</h4>
+                <pre><code>// Broker configuration
+num.network.threads=8  // 1 per 1Gbps throughput rule of thumb
+num.io.threads=16  // 2x CPU cores
+
+// Socket buffer sizing
+socket.send.buffer.bytes=1048576  // 1MB
+socket.receive.buffer.bytes=1048576
+socket.request.max.bytes=104857600  // 100MB max request
+
+// OS-level TCP tuning
+net.core.rmem_max=134217728  // 128MB
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.core.netdev_max_backlog=5000</code></pre>
+
+                <h4>Compression Trade-offs</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Codec</th>
+                            <th>Compression Ratio</th>
+                            <th>CPU Cost</th>
+                            <th>Use Case</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>none</td>
+                            <td>1x</td>
+                            <td>None</td>
+                            <td>Low latency, pre-compressed data</td>
+                        </tr>
+                        <tr>
+                            <td>lz4</td>
+                            <td>2-3x</td>
+                            <td>Low (5-10% CPU)</td>
+                            <td><strong>Default choice</strong> - best balance</td>
+                        </tr>
+                        <tr>
+                            <td>snappy</td>
+                            <td>2x</td>
+                            <td>Low</td>
+                            <td>Similar to lz4, legacy systems</td>
+                        </tr>
+                        <tr>
+                            <td>gzip</td>
+                            <td>3-5x</td>
+                            <td>High (20-30% CPU)</td>
+                            <td>Storage-constrained, batch jobs</td>
+                        </tr>
+                        <tr>
+                            <td>zstd</td>
+                            <td>3-4x</td>
+                            <td>Medium (configurable)</td>
+                            <td>Best compression, Kafka 2.1+</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <pre><code>// Enable compression at producer (broker re-compresses if codec differs)
+props.put("compression.type", "lz4");
+
+// Batch sizing impacts compression ratio
+props.put("batch.size", 65536);  // 64KB - larger batches = better compression
+props.put("linger.ms", 10);  // Wait up to 10ms for batch to fill</code></pre>
+            </div>
+
+            <button class="collapsible">Capacity Planning and Sizing</button>
+            <div class="collapsible-content">
+                <h3>Dimensioning a Kafka Cluster</h3>
+
+                <h4>Workload Characterization</h4>
+                <pre><code>// Example workload requirements
+Throughput: 1 GB/s write, 3 GB/s read (3 consumer groups)
+Message size: 1 KB average
+Retention: 7 days
+Replication factor: 3
+Availability: 99.99% (52 minutes downtime/year)</code></pre>
+
+                <h4>Storage Calculation</h4>
+                <pre><code>// Raw data calculation
+daily_data = (1 GB/s) * 86400 seconds = 86.4 TB/day
+retention_data = 86.4 TB/day * 7 days = 604.8 TB
+
+// With replication
+total_storage = 604.8 TB * 3 (RF) = 1,814.4 TB
+
+// Add overhead for indexes, compaction, slack space (20%)
+provisioned_storage = 1,814.4 TB * 1.2 = 2,177 TB
+
+// Per-broker sizing (target 8-12 TB per broker for manageability)
+brokers_needed = 2,177 TB / 10 TB = ~218 brokers
+
+// Practical: 250 brokers in 5 racks (50 per rack) for N+2 redundancy</code></pre>
+
+                <h4>Network Bandwidth</h4>
+                <pre><code>// Ingress (producers)
+ingress = 1 GB/s
+
+// Replication traffic (inter-broker)
+replication = 1 GB/s * (RF - 1) = 2 GB/s
+
+// Egress (consumers)
+egress = 3 GB/s (3 consumer groups reading)
+
+// Per broker (250 brokers)
+per_broker_ingress = (1 GB/s + 2 GB/s) / 250 = 12 MB/s
+per_broker_egress = 3 GB/s / 250 = 12 MB/s
+
+// Provision for spikes and rebalancing (3x headroom)
+required_nic = (12 MB/s * 3) * 8 = 288 Mbps  -> 1 Gbps NIC sufficient
+// For high throughput: 10 Gbps or bonded NICs</code></pre>
+
+                <h4>CPU and Memory</h4>
+                <pre><code>// CPU: Depends on compression, encryption
+// Rule of thumb: 1 core per 50 MB/s throughput
+cores_needed = (ingress + egress) / (50 MB/s) = 4 GB/s / 50 MB/s = 80 cores
+// Per broker: 80 / 250 = 0.32 cores (light workload)
+// Provision: 4-8 cores per broker for headroom
+
+// Memory: Kafka uses page cache extensively
+// Heap: 6-8 GB
+// Page cache: Aim to cache active segment per partition
+active_data_per_partition = 1 GB (segment.bytes default)
+partitions_per_broker = 2000
+page_cache_target = 2000 * 1 GB = 2 TB  // Impractical!
+
+// Realistic: Cache last 1 hour of data
+hourly_data = 1 GB/s * 3600s = 3.6 TB
+per_broker_cache = 3.6 TB / 250 = 14.4 GB
+
+// Total RAM: 6 GB (heap) + 15 GB (page cache) + 4 GB (OS) = 25 GB -> 32 GB instances</code></pre>
+
+                <div class="info-box important">
+                    <strong>Capacity Planning Reality Check:</strong>
+                    Calculations give baseline. Add 30-50% buffer for: uneven partition distribution, leader skew,
+                    traffic spikes, re-replication during failures, compaction overhead. Monitor actual usage and
+                    scale proactively when sustained utilization exceeds 70%.
+                </div>
+            </div>
+
+            <button class="collapsible">Monitoring and Observability</button>
+            <div class="collapsible-content">
+                <h3>Critical Metrics for Production</h3>
+
+                <h4>Broker Health Metrics</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Description</th>
+                            <th>Alert Threshold</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>UnderReplicatedPartitions</td>
+                            <td>Partitions with replicas out of sync</td>
+                            <td>&gt; 0 for &gt; 5 minutes</td>
+                        </tr>
+                        <tr>
+                            <td>OfflinePartitionsCount</td>
+                            <td>Partitions with no leader</td>
+                            <td>&gt; 0 (critical)</td>
+                        </tr>
+                        <tr>
+                            <td>ActiveControllerCount</td>
+                            <td>Should be 1 per cluster</td>
+                            <td>!= 1 (split brain)</td>
+                        </tr>
+                        <tr>
+                            <td>RequestHandlerAvgIdlePercent</td>
+                            <td>Broker thread pool saturation</td>
+                            <td>&lt; 20% (overloaded)</td>
+                        </tr>
+                        <tr>
+                            <td>NetworkProcessorAvgIdlePercent</td>
+                            <td>Network thread saturation</td>
+                            <td>&lt; 20%</td>
+                        </tr>
+                        <tr>
+                            <td>LogFlushRateAndTimeMs</td>
+                            <td>Disk flush latency</td>
+                            <td>&gt; 1000ms (disk issue)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Consumer Lag Monitoring</h4>
+                <pre><code>// Burrow (LinkedIn) - lag monitoring service
+// Metrics per consumer group
+{
+  "group": "order-processor",
+  "status": "WARNING",  // OK, WARNING, ERROR
+  "partitions": [
+    {
+      "topic": "orders",
+      "partition": 0,
+      "current_lag": 15000,  // Messages behind
+      "lag_trend": "increasing"  // Concern: not catching up
+    }
+  ]
+}
+
+// Alert conditions
+1. Lag > 100K messages for critical topics
+2. Lag increasing for > 15 minutes (consumer slower than producer)
+3. Consumer group empty (all consumers dead)
+4. Partition lag stuck (consumer stuck on poison pill)</code></pre>
+
+                <h4>Producer Metrics</h4>
+                <pre><code>// Key producer metrics (JMX)
+record-error-rate  // Failed sends
+record-retry-rate  // Retry rate (should be low)
+request-latency-avg  // End-to-end latency
+batch-size-avg  // Batching efficiency
+compression-rate-avg  // Compression effectiveness
+
+// Alerting
+- record-error-rate > 0.1% (quality issue)
+- request-latency-avg > 100ms for low-latency topics
+- batch-size-avg < 10KB (poor batching, tune linger.ms)</code></pre>
+
+                <h4>End-to-End Latency Tracking</h4>
+                <pre><code>// Inject timestamps at each stage
+class OrderEvent {
+    long producerTimestamp;  // When created
+    long brokerAppendTimestamp;  // Broker write time (Kafka adds)
+    long consumerReceiveTimestamp;  // When polled
+    long processingCompleteTimestamp;  // When processed
+}
+
+// Measure
+producer_latency = brokerAppendTimestamp - producerTimestamp
+replication_latency = consumerReceiveTimestamp - brokerAppendTimestamp
+processing_latency = processingCompleteTimestamp - consumerReceiveTimestamp
+end_to_end_latency = processingCompleteTimestamp - producerTimestamp
+
+// P99 latencies for dashboards and SLOs</code></pre>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Advanced Patterns & Use Cases</h2>
+
+            <button class="collapsible">Exactly-Once Semantics in Practice</button>
+            <div class="collapsible-content">
+                <h3>Transactional Kafka for Exactly-Once Processing</h3>
+                <p>
+                    Kafka's transactions enable exactly-once semantics (EOS) by atomically writing to multiple
+                    partitions and committing consumer offsets within a transaction.
+                </p>
+
+                <h4>Transactional Producer Configuration</h4>
+                <pre><code>// Enable idempotence (prerequisite for transactions)
+props.put("enable.idempotence", "true");
+
+// Set transactional ID (unique per producer instance)
+props.put("transactional.id", "order-processor-instance-0");
+
+// Increase timeout for transaction commits
+props.put("transaction.timeout.ms", "60000");  // 1 minute
+
+KafkaProducer<String, String> producer = new KafkaProducer<>(props);
+producer.initTransactions();  // Fence out zombies with same transactional.id
+
+try {
+    producer.beginTransaction();
+
+    // Write to multiple topics atomically
+    producer.send(new ProducerRecord<>("orders", orderId, orderData));
+    producer.send(new ProducerRecord<>("inventory", sku, inventoryUpdate));
+
+    // Commit consumed offsets (read-process-write pattern)
+    producer.sendOffsetsToTransaction(offsets, consumerGroupId);
+
+    producer.commitTransaction();
+} catch (Exception e) {
+    producer.abortTransaction();
+    throw e;
+}</code></pre>
+
+                <h4>Transactional Consumer</h4>
+                <pre><code>// Consumer must read only committed messages
+props.put("isolation.level", "read_committed");
+
+KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+
+while (true) {
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+
+    // Only sees messages from committed transactions
+    // Aborted transaction messages are filtered out
+
+    for (ConsumerRecord<String, String> record : records) {
+        process(record);
+    }
+}</code></pre>
+
+                <h4>Production Considerations</h4>
+                <ul>
+                    <li><strong>Performance:</strong> Transactions add ~10-20ms latency per commit</li>
+                    <li><strong>Transaction markers:</strong> Create additional log segments (storage overhead ~5%)</li>
+                    <li><strong>Coordinator failures:</strong> Transaction coordinators (brokers) must be reliable</li>
+                    <li><strong>Zombie fencing:</strong> transactional.id must be stable across restarts (not random)</li>
+                </ul>
+
+                <div class="info-box warning">
+                    <strong>Exactly-Once Limitation:</strong>
+                    EOS applies only within Kafka ecosystem (read from Kafka, write to Kafka). External system
+                    interactions (databases, APIs) still require idempotent operations or two-phase commit patterns.
+                </div>
+            </div>
+
+            <button class="collapsible">Compacted Topics for State Management</button>
+            <div class="collapsible-content">
+                <h3>Log Compaction for Changelog Topics</h3>
+                <p>
+                    Compacted topics retain only the latest value per key, making them ideal for changelog streams,
+                    database snapshots, and materialized views.
+                </p>
+
+                <h4>Configuration</h4>
+                <pre><code>// Topic configuration for compaction
+kafka-topics.sh --create --topic user-profiles \
+    --partitions 50 \
+    --replication-factor 3 \
+    --config cleanup.policy=compact \
+    --config min.cleanable.dirty.ratio=0.5 \  // Compact when 50% is duplicates
+    --config segment.ms=86400000 \  // 1 day segments
+    --config delete.retention.ms=86400000  // Keep tombstones for 1 day
+
+// Broker-level compaction tuning
+log.cleaner.threads=8  // Parallel compaction
+log.cleaner.dedupe.buffer.size=134217728  // 128MB per thread</code></pre>
+
+                <h4>Use Case: User Profile Cache</h4>
+                <pre><code>// Producer: Write user profile updates
+producer.send(new ProducerRecord<>(
+    "user-profiles",
+    userId,  // Key
+    profileJson  // Latest value (or null for delete)
+));
+
+// Consumer: Bootstrap state from compacted topic
+KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+consumer.assign(partitions);
+consumer.seekToBeginning(partitions);  // Read full history
+
+Map<String, UserProfile> profileCache = new HashMap<>();
+while (true) {
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+
+    for (ConsumerRecord<String, String> record : records) {
+        if (record.value() == null) {
+            profileCache.remove(record.key());  // Tombstone
+        } else {
+            profileCache.put(record.key(), deserialize(record.value()));
+        }
+    }
+
+    if (consumer.position(partition) >= endOffset) {
+        break;  // Caught up to latest
+    }
+}
+// profileCache now has latest state for all users</code></pre>
+
+                <h4>Compaction Behavior</h4>
+                <ul>
+                    <li><strong>Head section:</strong> Recent, uncompacted messages (dirty)</li>
+                    <li><strong>Tail section:</strong> Compacted messages (clean), one per key</li>
+                    <li><strong>Tombstones:</strong> Null values trigger deletion after delete.retention.ms</li>
+                    <li><strong>Non-deterministic:</strong> Compaction timing varies (async background process)</li>
+                </ul>
+
+                <div class="info-box tip">
+                    <strong>Operational Tip:</strong>
+                    Compaction can lag during high write volume. Monitor log.cleaner.buffer-utilization-percent
+                    metric. If saturated, increase log.cleaner.dedupe.buffer.size or log.cleaner.threads.
+                    Compacted topics grow unbounded if keys never repeat (defeats purpose).
+                </div>
+            </div>
+
+            <button class="collapsible">Tiered Storage for Long-Term Retention</button>
+            <div class="collapsible-content">
+                <h3>Offloading Cold Data to Object Storage</h3>
+                <p>
+                    Kafka 3.0+ supports tiered storage (KIP-405), allowing older segments to be moved to S3/GCS/Azure Blob
+                    while keeping recent data on local disks for fast access.
+                </p>
+
+                <h4>Configuration</h4>
+                <pre><code>// Broker configuration
+remote.log.storage.system.enable=true
+remote.log.storage.manager.class.name=org.apache.kafka.server.log.remote.storage.RemoteLogManager
+remote.log.metadata.manager.class.name=org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager
+
+// S3 backend (example)
+remote.log.storage.provider=s3
+remote.log.storage.s3.bucket=kafka-tiered-storage
+remote.log.storage.s3.region=us-east-1
+
+// Topic configuration
+local.retention.ms=86400000  // Keep 1 day locally
+retention.ms=2592000000  // 30 days total (29 days in S3)
+remote.storage.enable=true</code></pre>
+
+                <h4>Use Cases</h4>
+                <ul>
+                    <li><strong>Compliance:</strong> Retain audit logs for years without massive disk arrays</li>
+                    <li><strong>Cost optimization:</strong> S3 storage ~$0.023/GB/month vs NVMe ~$0.10/GB/month</li>
+                    <li><strong>Disaster recovery:</strong> Remote storage survives datacenter loss</li>
+                    <li><strong>Analytics:</strong> Historical data accessible to consumers without local retention</li>
+                </ul>
+
+                <h4>Trade-offs</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Local Storage</th>
+                            <th>Tiered Storage</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Latency (P99)</td>
+                            <td>&lt; 10ms</td>
+                            <td>50-200ms (S3 GET)</td>
+                        </tr>
+                        <tr>
+                            <td>Cost (1 year retention)</td>
+                            <td>High (disk CAPEX)</td>
+                            <td>Low (object storage OPEX)</td>
+                        </tr>
+                        <tr>
+                            <td>Operational complexity</td>
+                            <td>Simple</td>
+                            <td>Complex (consistency, lifecycle)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>Production Maturity:</strong>
+                    Tiered storage is relatively new (Kafka 3.6 production-ready). Test extensively: S3 eventual consistency
+                    can cause metadata inconsistencies, segment uploads during network issues, and cross-region replication lag.
+                    Monitor remote.log.copy.lag.bytes metric.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Principal-Level Thought Questions</h2>
+            <p>
+                These questions explore trade-offs, edge cases, and system design decisions that require deep understanding
+                of Kafka internals and distributed systems principles.
+            </p>
+
+            <button class="collapsible">Q1: Designing for Multi-Tenancy at Scale</button>
+            <div class="collapsible-content">
+                <p><strong>Scenario:</strong></p>
+                <p>
+                    You're building a multi-tenant SaaS platform serving 10,000 customers. Each tenant produces
+                    ~100 MB/day of event data. Some tenants are 1000x larger (noisy neighbors). How do you architect
+                    Kafka to ensure isolation, fairness, and cost efficiency?
+                </p>
+
+                <h4>Considerations:</h4>
+                <ul>
+                    <li>Topic-per-tenant vs. shared topics with tenant-id key</li>
+                    <li>Partition limits (10K tenants × partitions per tenant)</li>
+                    <li>Quota enforcement (producer/consumer throttling)</li>
+                    <li>Cost allocation and chargeback</li>
+                    <li>Tenant onboarding/offboarding automation</li>
+                </ul>
+
+                <h4>Proposed Approach:</h4>
+                <pre><code>// Hybrid model:
+// Tier 1 (Enterprise, top 100 tenants): Dedicated topics
+//   - Full isolation, custom retention
+//   - Example: tenant-acme-orders (50 partitions)
+
+// Tier 2 (Standard, 9900 tenants): Shared topics with tenant-id routing
+//   - Topic: shared-orders (500 partitions)
+//   - Partitioning: hash(tenant-id) % 500
+//   - Consumer per tenant reads all partitions, filters by tenant-id
+
+// Quotas per tenant
+kafka-configs.sh --alter --add-config 'producer_byte_rate=10485760' \
+    --entity-type users --entity-name tenant-acme
+
+// Throttling prevents noisy neighbor from exhausting broker resources
+
+// Monitoring: Track per-tenant metrics via client-id tagging
+client.id=tenant-acme-producer-instance-1</code></pre>
+
+                <h4>Trade-offs:</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Approach</th>
+                            <th>Pros</th>
+                            <th>Cons</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Topic-per-tenant</td>
+                            <td>Perfect isolation, tenant-specific config</td>
+                            <td>10K topics × partitions = millions of partition-replicas</td>
+                        </tr>
+                        <tr>
+                            <td>Shared topics</td>
+                            <td>Scales to millions of tenants</td>
+                            <td>Cross-tenant data leakage risk, harder quotas</td>
+                        </tr>
+                        <tr>
+                            <td>Hybrid (recommended)</td>
+                            <td>Balances isolation and scalability</td>
+                            <td>Operational complexity (multiple patterns)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Follow-up:</strong> How do you prevent a malicious tenant from flooding the cluster?
+                How do you handle schema incompatibilities across tenant versions?</p>
+            </div>
+
+            <button class="collapsible">Q2: Handling Backpressure in Streaming Pipelines</button>
+            <div class="collapsible-content">
+                <p><strong>Scenario:</strong></p>
+                <p>
+                    Your Kafka consumer writes to Elasticsearch. During ES cluster upgrades or slowdowns, consumer
+                    lag spikes from 0 to 10 million messages. Lag takes hours to recover, causing downstream
+                    dashboards to show stale data. How do you architect for graceful degradation?
+                </p>
+
+                <h4>Problem Analysis:</h4>
+                <ul>
+                    <li>Consumer processing rate limited by ES write throughput (~5K docs/sec/node)</li>
+                    <li>Kafka can produce 100K msgs/sec, consumer can only handle 5K/sec</li>
+                    <li>Traditional approach: Scale consumers (doesn't help if ES is bottleneck)</li>
+                </ul>
+
+                <h4>Solutions:</h4>
+
+                <p><strong>1. Dynamic Throttling at Consumer</strong></p>
+                <pre><code>// Adaptive max.poll.records based on processing latency
+class AdaptiveConsumer {
+    int maxPollRecords = 500;
+
+    void adjustPolling() {
+        long avgProcessingTime = metrics.getAvgProcessTime();
+
+        if (avgProcessingTime > 5000 && maxPollRecords > 100) {
+            maxPollRecords -= 50;  // Slow down
+            consumer.updateConfig("max.poll.records", maxPollRecords);
+        } else if (avgProcessingTime < 1000 && maxPollRecords < 1000) {
+            maxPollRecords += 50;  // Speed up
+        }
+    }
+}
+
+// Prevents overwhelming downstream system while avoiding poll timeout</code></pre>
+
+                <p><strong>2. Buffering Layer (Redis/SQS)</strong></p>
+                <pre><code>// Decouple Kafka consumption from ES writes
+Kafka -> Consumer -> Redis Stream -> Worker Pool -> Elasticsearch
+
+// Consumer reads from Kafka at max speed, pushes to Redis
+// Workers pull from Redis at rate ES can handle
+// Redis absorbs bursts, prevents consumer lag
+
+// Trade-off: Additional latency, operational complexity (Redis maintenance)</code></pre>
+
+                <p><strong>3. Priority Queues</strong></p>
+                <pre><code>// Separate Kafka topics by priority
+kafka-topics: high-priority-events, low-priority-events
+
+// During backpressure, consumer processes only high-priority
+if (esClusterHealthYellow) {
+    consumer.pause(lowPriorityPartitions);  // Stop polling low-priority
+    consumer.resume(highPriorityPartitions);  // Focus on critical data
+}
+
+// Once ES recovers, resume all partitions
+// Ensures critical data (e.g., orders) takes precedence over logs</code></pre>
+
+                <p><strong>4. Bulkhead Pattern with Circuit Breaker</strong></p>
+                <pre><code>// Limit concurrent ES writes to prevent cascading failures
+Semaphore esSemaphore = new Semaphore(100);  // Max 100 concurrent ES writes
+
+void processRecord(Record record) {
+    esSemaphore.acquire();
+    try {
+        if (esCircuitBreaker.isOpen()) {
+            sendToDLQ(record);  // Don't retry during outage
+            return;
+        }
+        elasticsearchClient.index(record);
+    } finally {
+        esSemaphore.release();
+    }
+}</code></pre>
+
+                <p><strong>Recommended Architecture:</strong></p>
+                <pre><code>// Combination approach
+1. Separate topics by priority
+2. Adaptive polling to prevent consumer crashes
+3. Circuit breaker to fail fast during ES outages
+4. Alerting on lag > threshold with automatic scaling triggers
+
+// SLO: P99 lag < 1 minute for high-priority, < 1 hour for low-priority</code></pre>
+            </div>
+
+            <button class="collapsible">Q3: Zero-Downtime Cluster Migrations</button>
+            <div class="collapsible-content">
+                <p><strong>Scenario:</strong></p>
+                <p>
+                    You need to migrate from an on-prem Kafka cluster (200 brokers, 100TB data) to a managed
+                    Kafka service (Confluent Cloud/MSK). Requirements: zero data loss, minimal downtime
+                    (&lt; 5 minutes), no producer/consumer reconfiguration. How do you execute this migration?
+                </p>
+
+                <h4>Migration Strategy:</h4>
+
+                <p><strong>Phase 1: Parallel Dual-Write (Weeks 1-2)</strong></p>
+                <pre><code>// Update producers to write to both clusters
+class DualWriteProducer {
+    KafkaProducer<K,V> primaryProducer;  // On-prem
+    KafkaProducer<K,V> secondaryProducer;  // Cloud
+
+    void send(ProducerRecord<K,V> record) {
+        CompletableFuture<RecordMetadata> primary =
+            primaryProducer.send(record);
+
+        CompletableFuture<RecordMetadata> secondary =
+            secondaryProducer.send(record);
+
+        // Wait for primary, fire-and-forget secondary
+        primary.get();
+        // If secondary fails, log but don't block (catch-up later)
+    }
+}
+
+// Benefit: Cloud cluster accumulates data without impacting on-prem
+// Risk: Inconsistencies if secondary write fails (acceptable - replicate later)</code></pre>
+
+                <p><strong>Phase 2: Backfill Historical Data (Weeks 2-3)</strong></p>
+                <pre><code>// MirrorMaker 2 replicates historical data
+# mm2.properties
+clusters = onprem, cloud
+onprem.bootstrap.servers = onprem-kafka:9092
+cloud.bootstrap.servers = cloud-kafka:9092
+
+onprem->cloud.enabled = true
+topics = .*  // Replicate all topics
+
+// MM2 replicates from beginning, eventually catches up to dual-write point
+// Monitor: lag metrics until lag < 1 minute</code></pre>
+
+                <p><strong>Phase 3: Consumer Cutover (Week 4)</strong></p>
+                <pre><code>// Gradual consumer migration (canary pattern)
+1. Start 10% of consumers pointing to cloud cluster
+2. Monitor: data correctness, lag, errors
+3. If success, migrate 50%, then 100%
+4. Keep on-prem consumers running as fallback
+
+// DNS-based switching for instant rollback
+consumer.bootstrap.servers = kafka-active.mycompany.com
+// Points to on-prem initially, flip to cloud after validation</code></pre>
+
+                <p><strong>Phase 4: Producer Cutover (Week 5)</strong></p>
+                <pre><code>// Stop dual-write, point all producers to cloud
+1. Deploy producer config: bootstrap.servers = cloud-kafka:9092
+2. Monitor: throughput, error rates
+3. After 24 hours stable, decommission on-prem cluster
+
+// Rollback plan: Revert DNS/config, restart consumers on on-prem</code></pre>
+
+                <h4>Edge Cases to Handle:</h4>
+                <ul>
+                    <li><strong>Schema Registry migration:</strong> Export schemas, import to cloud registry before producer migration</li>
+                    <li><strong>ACLs and quotas:</strong> Replicate security configurations to cloud cluster</li>
+                    <li><strong>Offset mapping:</strong> MM2 creates offset-syncs topic, but manual intervention needed for precise consumer resumption</li>
+                    <li><strong>Monitoring cutover:</strong> Update dashboards/alerts to point to cloud cluster metrics</li>
+                </ul>
+
+                <div class="info-box important">
+                    <strong>Rollback Complexity:</strong>
+                    Once producers write exclusively to cloud and on-prem is decommissioned, rollback becomes
+                    reverse migration (expensive). Maintain parallel writes for 1-2 weeks post-cutover to allow
+                    graceful rollback if issues discovered.
+                </div>
+
+                <p><strong>Follow-up:</strong> How do you handle a scenario where cloud cluster performance is
+                worse than on-prem (higher latency, lower throughput)? What are your contingency plans?</p>
+            </div>
+
+            <button class="collapsible">Q4: Designing for Regulatory Compliance (GDPR/CCPA)</button>
+            <div class="collapsible-content">
+                <p><strong>Scenario:</strong></p>
+                <p>
+                    Your Kafka cluster stores user activity data. Under GDPR, you must support "right to be forgotten" -
+                    delete all user data within 30 days of request. Kafka is append-only. How do you architect for
+                    compliant data deletion?
+                </p>
+
+                <h4>Challenges:</h4>
+                <ul>
+                    <li>Kafka doesn't support deleting specific messages from middle of log</li>
+                    <li>Compaction only removes old values for same key (not all occurrences)</li>
+                    <li>Replication: Deleted data may still exist on follower replicas during replication lag</li>
+                    <li>Backups: Archived segments contain deleted user data</li>
+                </ul>
+
+                <h4>Solution Architecture:</h4>
+
+                <p><strong>1. Pseudonymization at Write</strong></p>
+                <pre><code>// Don't store PII directly in Kafka messages
+class UserEvent {
+    String pseudonymousUserId;  // One-way hash of real user ID
+    String eventType;
+    Map<String, Object> properties;  // No PII (names, emails)
+}
+
+// Separate mapping table (in database, not Kafka)
+// user_id -> pseudonymous_id
+// On deletion request: Delete from mapping table
+// User data in Kafka becomes unlinkable (effectively deleted)</code></pre>
+
+                <p><strong>2. Tombstone-based Deletion for Compacted Topics</strong></p>
+                <pre><code>// For user profile changelog topics (compacted)
+kafka-topics.sh --create --topic user-profiles \
+    --config cleanup.policy=compact \
+    --config delete.retention.ms=2592000000  // 30 days
+
+// On deletion request:
+producer.send(new ProducerRecord<>(
+    "user-profiles",
+    userId,
+    null  // Tombstone triggers deletion
+));
+
+// After delete.retention.ms (30 days), tombstone and all traces removed</code></pre>
+
+                <p><strong>3. Time-Based Partitioning with TTL</strong></p>
+                <pre><code>// Partition topics by date: user-events-2024-01-01, user-events-2024-01-02
+// Set retention.ms = 30 days
+// On deletion request: Mark user as deleted in separate "deleted-users" topic
+// Downstream consumers filter out events for deleted users
+// After 30 days, entire topic deleted, no per-message deletion needed
+
+// Consumer-side filtering
+if (deletedUsersCache.contains(event.userId)) {
+    continue;  // Skip processing deleted user events
+}</code></pre>
+
+                <p><strong>4. Immutable Event Store + Mutable Views</strong></p>
+                <pre><code>// Kafka as immutable event log (never delete)
+// Materialized views (Elasticsearch, Postgres) contain derived data
+// On deletion request:
+1. Delete from all materialized views (ES, DB)
+2. Add userId to "deleted-users" compacted topic
+3. Downstream processors replay and rebuild views, skipping deleted users
+4. Kafka events remain but are "invisible" to all consumers
+
+// GDPR compliance: Data not directly accessible (needs cross-referencing with deleted list)</code></pre>
+
+                <h4>Recommended Hybrid Approach:</h4>
+                <pre><code>// Combine strategies based on data type
+1. Transactional data (orders, payments): Pseudonymization
+   - Unlinkable after mapping table deletion
+
+2. User profiles (mutable state): Compacted topics with tombstones
+   - Physically deleted after 30 days
+
+3. Analytics events (immutable, high volume): Time-partitioned + deleted-users filter
+   - Auto-expire old partitions, filter recent data
+
+4. Audit logs (compliance, long retention): Encrypt with user-specific key
+   - On deletion, delete encryption key -> data unrecoverable
+
+// Document data retention policies per topic in schema registry metadata</code></pre>
+
+                <div class="info-box warning">
+                    <strong>Legal Consideration:</strong>
+                    Consult legal team on "anonymization" vs "pseudonymization" - GDPR treats them differently.
+                    Truly anonymous data (irreversibly de-identified) is not personal data. Hashed IDs may still
+                    be considered personal data if re-identification is possible.
+                </div>
+
+                <p><strong>Follow-up:</strong> How do you prove compliance during audits? What audit trails do you maintain?</p>
+            </div>
+
+            <button class="collapsible">Q5: Kafka vs. Alternatives - When Not to Use Kafka</button>
+            <div class="collapsible-content">
+                <p><strong>Question:</strong></p>
+                <p>
+                    As a principal engineer, when would you recommend against using Kafka? What are the anti-patterns
+                    and scenarios where alternative technologies (Pulsar, RabbitMQ, SQS, Kinesis, event buses) are better suited?
+                </p>
+
+                <h4>Kafka Anti-Patterns:</h4>
+
+                <p><strong>1. Request-Reply / RPC Patterns</strong></p>
+                <pre><code>// Anti-pattern: Using Kafka for synchronous request-response
+service.request(payload)
+  -> produce to request-topic
+  -> wait for response on response-topic (with correlation ID)
+  -> timeout after 30 seconds
+
+// Problems:
+// - High latency (network + serialization + broker latency)
+// - Consumer must stay online to receive response
+// - Complexity of correlation ID management
+// - Better alternatives: gRPC, REST, GraphQL</code></pre>
+
+                <p><strong>Why not Kafka:</strong> Kafka optimized for fire-and-forget async messaging, not synchronous RPC.</p>
+
+                <p><strong>2. Small Message, High Latency Sensitivity (&lt; 1ms)</strong></p>
+                <pre><code>// Use case: Trading systems, high-frequency gaming
+// Requirements: P99 latency < 1ms
+
+// Kafka typical latency: 5-50ms (producer -> broker -> consumer)
+// Better alternatives:
+// - In-memory data grids (Hazelcast, Redis Streams)
+// - Direct TCP/UDP messaging
+// - Shared memory (same-host)</code></pre>
+
+                <p><strong>3. Complex Routing / Message Filtering</strong></p>
+                <pre><code>// Use case: IoT sensor data with complex routing rules
+// - Route temperature > 100°C to alerting system
+// - Route pressure anomalies to maintenance system
+// - Route all data to analytics
+
+// Kafka approach: Consumers read all messages, filter in application code
+// - Wastes bandwidth, CPU
+// - Better alternative: RabbitMQ (topic exchanges with routing keys)
+//   or AWS EventBridge (rule-based routing)</code></pre>
+
+                <p><strong>4. Message Priority / Selective Consumption</strong></p>
+                <pre><code>// Use case: Task queue with priority levels (critical, high, normal, low)
+// Requirements: Process critical tasks first, even if queued later
+
+// Kafka limitation: FIFO per partition, no built-in priority
+// Workaround: Separate topics per priority (operational overhead)
+// Better alternative: RabbitMQ (priority queues), SQS (message groups)</code></pre>
+
+                <p><strong>5. Transient, Short-Lived Queues</strong></p>
+                <pre><code>// Use case: Per-user notification queues (1 million users)
+// Each user has ephemeral queue for push notifications
+
+// Kafka: Topics are heavyweight (metadata, ZK/KRaft overhead)
+// Creating 1M topics is impractical
+// Better alternative: RabbitMQ (lightweight queues), SQS, Azure Service Bus</code></pre>
+
+                <h4>Decision Matrix:</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Use Case</th>
+                            <th>Recommended Technology</th>
+                            <th>Why Not Kafka</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Event streaming, analytics pipelines</td>
+                            <td><strong>Kafka ✓</strong></td>
+                            <td>-</td>
+                        </tr>
+                        <tr>
+                            <td>RPC / request-reply</td>
+                            <td>gRPC, REST</td>
+                            <td>High latency, complexity</td>
+                        </tr>
+                        <tr>
+                            <td>Ultra-low latency (&lt;1ms)</td>
+                            <td>Redis Streams, Aeron</td>
+                            <td>Too slow</td>
+                        </tr>
+                        <tr>
+                            <td>Task queues with retries</td>
+                            <td>SQS, RabbitMQ</td>
+                            <td>No visibility timeout, complex DLQ</td>
+                        </tr>
+                        <tr>
+                            <td>Pub/sub with complex routing</td>
+                            <td>RabbitMQ, EventBridge</td>
+                            <td>No routing logic, all-or-nothing consumption</td>
+                        </tr>
+                        <tr>
+                            <td>Serverless event bus</td>
+                            <td>SNS/SQS, EventBridge</td>
+                            <td>Operational overhead (self-managed)</td>
+                        </tr>
+                        <tr>
+                            <td>Multi-tenant with geo-replication</td>
+                            <td>Pulsar</td>
+                            <td>Pulsar has better multi-tenancy, geo-replication</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>When Kafka Excels:</h4>
+                <ul>
+                    <li>High-throughput event streaming (TB/day+)</li>
+                    <li>Event sourcing / CQRS architectures</li>
+                    <li>Log aggregation at scale</li>
+                    <li>Change data capture (CDC) pipelines</li>
+                    <li>Replayable message history</li>
+                    <li>Exactly-once processing semantics needed</li>
+                </ul>
+
+                <div class="info-box tip">
+                    <strong>Principal Engineer Perspective:</strong>
+                    Don't use Kafka because "everyone uses Kafka." Evaluate your specific requirements:
+                    throughput, latency, ordering, durability, operational complexity. Kafka is powerful but
+                    comes with operational overhead. For small-scale systems (&lt; 1GB/day), managed services
+                    like SQS/SNS or RabbitMQ may be more cost-effective and simpler to operate.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Additional Resources</h2>
+            <ul>
+                <li><a href="https://kafka.apache.org/documentation/" target="_blank">Apache Kafka Documentation</a></li>
+                <li><a href="https://www.confluent.io/blog/" target="_blank">Confluent Engineering Blog</a></li>
+                <li><a href="https://github.com/linkedin/kafka" target="_blank">Original Kafka Paper (LinkedIn)</a></li>
+                <li><a href="https://engineering.linkedin.com/kafka" target="_blank">LinkedIn Kafka Engineering Posts</a></li>
+                <li><a href="https://github.com/apache/kafka/tree/trunk/config" target="_blank">Kafka Configuration Reference</a></li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 System Design Reference Guide | Your Personal Learning Resource</p>
+    </footer>
+
+    <script src="../js/main.js"></script>
+</body>
+</html>
