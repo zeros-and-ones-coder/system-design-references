@@ -1,0 +1,1608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Security & Protection - System Design Guide</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-logo">System Design Guide</h1>
+            <button class="menu-toggle" aria-label="Toggle menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <ul class="nav-menu">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../basics/index.html">Basics</a></li>
+                <li><a href="../kafka/index.html">Kafka</a></li>
+                <li><a href="../microservices/index.html">Microservices</a></li>
+                <li><a href="../oauth/index.html">OAuth & OIDC</a></li>
+                <li><a href="../data-security/index.html" class="active">Data Security</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="breadcrumb">
+            <a href="../index.html">Home</a>
+            <span>/</span>
+            <span>Data Security</span>
+        </div>
+
+        <header class="hero">
+            <h1>Protecting Sensitive Data</h1>
+            <p class="subtitle">Encoding, encryption, hashing, and tokenization—knowing which one to use and when</p>
+        </header>
+
+        <section class="content-section">
+            <h2>Introduction</h2>
+            <p>
+                I'll be honest—early in my career, I thought encryption solved everything. Just encrypt the data and you're secure, right? Then I encrypted credit card numbers in our database, couldn't search them anymore, and the finance team was furious. Then I hashed passwords with MD5 (yikes), stored API keys in environment variables (double yikes), and sent SSNs in Kafka events in plaintext because "it's internal traffic" (please don't do this).
+            </p>
+
+            <p>
+                After a decade of security audits, PCI-DSS compliance, GDPR implementations, and one very expensive data breach, I've learned that data security isn't about picking one technique—it's about knowing which tool to use for which problem. Let me show you what actually works.
+            </p>
+
+            <div class="info-box important">
+                <strong>Architect Perspective:</strong>
+                I've designed security architectures for healthcare (HIPAA), fintech (PCI-DSS), and SaaS platforms (SOC 2). The complexity varies, but the fundamentals are the same: encrypt data in transit, encrypt sensitive data at rest, hash passwords, tokenize payment data, and for the love of all that's holy, don't roll your own crypto.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>The Big Picture: What Goes Where</h2>
+
+            <h3>Understanding the Landscape</h3>
+            <p>
+                Before we dive deep, here's how these techniques fit together in a typical system:
+            </p>
+
+            <pre><code>┌─────────────────────────────────────────────────────────────────┐
+│                     DATA PROTECTION LAYERS                      │
+└─────────────────────────────────────────────────────────────────┘
+
+DATA IN TRANSIT (Moving between systems)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Browser ──TLS 1.3──▶ Load Balancer ──TLS──▶ Service ──TLS──▶ DB
+         (HTTPS)                     (mTLS)            (encrypted)
+
+Kafka Producer ──TLS──▶ Kafka Broker ──TLS──▶ Kafka Consumer
+                (encrypted)         (encrypted)
+
+Technique: TLS/HTTPS, mTLS for service-to-service
+When: ALWAYS. No exceptions.
+
+
+DATA AT REST (Stored in systems)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Database:
+  - Passwords          → Bcrypt/Argon2 (HASH, never reversible)
+  - Credit Cards       → Tokenization (replace with token)
+  - SSN, DOB           → AES-256-GCM (ENCRYPT, reversible)
+  - Email, Name        → Plaintext (for search/queries)
+  - API Keys           → SHA-256 (HASH, store hash only)
+
+Kafka Topics:
+  - PII Data           → Field-level encryption before publish
+  - Payment Events     → Tokenized card numbers
+  - Audit Logs         → Encrypted fields, plaintext metadata
+
+Files/S3:
+  - User Documents     → Server-side encryption (SSE)
+  - Backups            → Client-side encryption before upload
+  - Logs               → Encrypted with rotation
+
+
+DATA IN USE (Being processed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Application Memory:
+  - Decrypt only when needed
+  - Clear sensitive data immediately after use
+  - Never log decrypted values
+  - Use memory encryption for ultra-sensitive data</code></pre>
+
+            <div class="info-box note">
+                <strong>The Golden Rule:</strong>
+                If you don't need the data in plaintext, don't store it in plaintext. Hash it. If you need it later but not for searching, encrypt it. If you need it for searching but it's super sensitive, tokenize it. If it's just text that needs to survive HTTP, encode it. Each has a purpose.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Encoding vs Encryption vs Hashing vs Tokenization</h2>
+
+            <button class="collapsible">Encoding: Not Security, Just Representation</button>
+            <div class="collapsible-content">
+                <h3>What It Is</h3>
+                <p>
+                    Encoding transforms data into a different format for transmission or storage. It's <strong>not</strong> for security—anyone can decode it. It's for compatibility.
+                </p>
+
+                <h4>Common Examples</h4>
+                <pre><code>// Base64 encoding (NOT ENCRYPTION!)
+Original: "password123"
+Encoded:  "cGFzc3dvcmQxMjM="
+
+// Anyone can decode this!
+echo "cGFzc3dvcmQxMjM=" | base64 -d
+// Output: password123
+
+// URL encoding
+Original: "user@example.com?admin=true"
+Encoded:  "user%40example.com%3Fadmin%3Dtrue"
+
+// JWT body (just Base64 encoded, not encrypted!)
+eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0
+// Decodes to: {"sub":"1234567890","name":"John Doe"}</code></pre>
+
+                <h4>When to Use Encoding</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Use Case</th>
+                            <th>Why</th>
+                            <th>Example</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Binary data in JSON</td>
+                            <td>JSON doesn't support binary</td>
+                            <td>Base64 encode image before sending</td>
+                        </tr>
+                        <tr>
+                            <td>Special chars in URLs</td>
+                            <td>URLs have reserved characters</td>
+                            <td>URL-encode query parameters</td>
+                        </tr>
+                        <tr>
+                            <td>Email transmission</td>
+                            <td>SMTP is 7-bit ASCII</td>
+                            <td>Base64 encode attachments</td>
+                        </tr>
+                        <tr>
+                            <td>Displaying non-printable data</td>
+                            <td>Terminals don't handle all bytes</td>
+                            <td>Hex encode binary data in logs</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>The Mistake I Made:</strong>
+                    Early in my career, I Base64 encoded API keys before storing them in the database. I thought I was "encrypting" them. During a code review, a senior engineer decoded one in 2 seconds. "This is encoding, not encryption," he said. "Anyone with database access can decode this." He was right. Encoding is for transport, not security.
+                </div>
+
+                <h4>What NOT to Do</h4>
+                <pre><code>// DON'T: Base64 encode passwords
+const encodedPassword = btoa("password123");
+await db.save({ password: encodedPassword });  // ❌ Terrible!
+
+// DON'T: Think encoding protects data
+const apiKey = "sk_live_abc123";
+const "secure" = btoa(apiKey);  // ❌ This is NOT secure!
+
+// DO: Use proper hashing/encryption
+const hashedPassword = await bcrypt.hash("password123", 10);
+const encryptedApiKey = await encrypt(apiKey, secretKey);</code></pre>
+            </div>
+
+            <button class="collapsible">Hashing: One-Way Transformation</button>
+            <div class="collapsible-content">
+                <h3>What It Is</h3>
+                <p>
+                    Hashing is a one-way function. You can't reverse it (by design). You hash data, store the hash, and later compare hashes to verify the original data. Perfect for passwords.
+                </p>
+
+                <h4>How It Works</h4>
+                <pre><code>// User signs up
+Input:  "MySecurePassword123"
+Hash:   bcrypt → "$2b$10$rXK7V9zN3.qJ8Xq8uQa.1e7nF..."
+Store:  Save the hash in database
+
+// User logs in later
+Input:  "MySecurePassword123"
+Hash:   bcrypt → "$2b$10$rXK7V9zN3.qJ8Xq8uQa.1e7nF..." (same hash!)
+Verify: Compare stored hash with new hash → Match! ✓
+
+// Attacker tries to reverse
+Hash:   "$2b$10$rXK7V9zN3.qJ8Xq8uQa.1e7nF..."
+Reverse: ??? (IMPOSSIBLE with proper algorithms)
+
+// Properties of good hashing:
+1. Same input → always same output (deterministic)
+2. Different input → completely different output (avalanche effect)
+3. Cannot reverse hash to get original (one-way)
+4. Computationally expensive (slows down brute force)</code></pre>
+
+                <h4>Hashing Algorithms</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Algorithm</th>
+                            <th>Status</th>
+                            <th>Use Case</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>MD5</td>
+                            <td>❌ BROKEN</td>
+                            <td>Never use for security (checksums only)</td>
+                        </tr>
+                        <tr>
+                            <td>SHA-1</td>
+                            <td>❌ BROKEN</td>
+                            <td>Deprecated, collision attacks exist</td>
+                        </tr>
+                        <tr>
+                            <td>SHA-256/SHA-512</td>
+                            <td>✓ OK</td>
+                            <td>API key storage, data integrity (NOT passwords)</td>
+                        </tr>
+                        <tr>
+                            <td>Bcrypt</td>
+                            <td>✓✓ GOOD</td>
+                            <td>Password hashing (current standard)</td>
+                        </tr>
+                        <tr>
+                            <td>Argon2</td>
+                            <td>✓✓✓ BEST</td>
+                            <td>Password hashing (newest, most secure)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Real Production Code</h4>
+                <pre><code>// Password hashing on signup
+const bcrypt = require('bcrypt');
+
+async function createUser(email, password) {
+    // ALWAYS use a salt (bcrypt does this automatically)
+    const saltRounds = 10;  // Higher = slower = more secure (balance needed)
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    await db.users.insert({
+        email: email,
+        password_hash: hashedPassword,  // Store ONLY the hash
+        created_at: new Date()
+    });
+
+    // NEVER log the plaintext password!
+    logger.info('User created', { email });
+}
+
+// Password verification on login
+async function login(email, password) {
+    const user = await db.users.findOne({ email });
+    if (!user) {
+        throw new Error('Invalid credentials');
+    }
+
+    // Compare plaintext password with stored hash
+    const isValid = await bcrypt.compare(password, user.password_hash);
+
+    if (!isValid) {
+        throw new Error('Invalid credentials');
+    }
+
+    return generateJWT(user);
+}
+
+// API key hashing
+async function storeApiKey(userId, apiKey) {
+    // Hash the API key before storing
+    const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
+
+    await db.api_keys.insert({
+        user_id: userId,
+        key_hash: hash,  // Store hash, not the key
+        created_at: new Date()
+    });
+
+    // Return the plaintext key to user ONCE
+    // They must save it, we can't recover it later
+    return apiKey;
+}
+
+// Verifying API key
+async function verifyApiKey(apiKey) {
+    const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const record = await db.api_keys.findOne({ key_hash: hash });
+    return record ? record.user_id : null;
+}</code></pre>
+
+                <div class="info-box important">
+                    <strong>The 2019 Breach That Could've Been Prevented:</strong>
+                    A company I consulted for stored passwords hashed with MD5, no salt. Attacker got the database dump, ran it through a rainbow table, and cracked 60% of passwords in under an hour. Cost: $2M in breach response, lawsuits, and reputation damage. If they'd used bcrypt, those passwords would still be secure today.
+                </div>
+
+                <h4>Common Mistakes</h4>
+                <pre><code>// ❌ DON'T: Use fast hashing for passwords
+const hash = crypto.createHash('sha256').update(password).digest('hex');
+// Problem: Too fast, easy to brute force (billions of hashes/sec on GPU)
+
+// ❌ DON'T: Hash without salt
+const hash = md5(password);
+// Problem: Same password = same hash, vulnerable to rainbow tables
+
+// ❌ DON'T: Implement your own salt/hashing
+const salt = Math.random().toString();  // Predictable!
+const hash = sha256(password + salt);   // Weak!
+
+// ✓ DO: Use battle-tested libraries
+const hash = await bcrypt.hash(password, 10);
+const hash2 = await argon2.hash(password);</code></pre>
+            </div>
+
+            <button class="collapsible">Encryption: Reversible Transformation</button>
+            <div class="collapsible-content">
+                <h3>What It Is</h3>
+                <p>
+                    Encryption transforms data into ciphertext using a key. You can decrypt it back to plaintext with the same key (symmetric) or a paired key (asymmetric). Use this when you need the data later.
+                </p>
+
+                <h4>Symmetric vs Asymmetric</h4>
+                <pre><code>SYMMETRIC ENCRYPTION (Same key for encrypt/decrypt)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Plaintext:  "4111-1111-1111-1111"
+Key:        "aes-256-secret-key-32-bytes-long"
+
+Encrypt →   Ciphertext: "a8f7b2c9d4e1f6g3h5..."
+Decrypt →   Plaintext:  "4111-1111-1111-1111"
+
+Pros: Fast, efficient, good for large data
+Cons: Must share the key securely
+Use: Encrypting database fields, file encryption
+
+
+ASYMMETRIC ENCRYPTION (Public/private key pair)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Plaintext:     "sensitive data"
+Public Key:    (can be shared openly)
+Private Key:   (keep secret!)
+
+Encrypt with PUBLIC key  →  Ciphertext: "x9y8z7..."
+Decrypt with PRIVATE key →  Plaintext:  "sensitive data"
+
+Pros: Don't need to share decryption key
+Cons: Slow, limited data size
+Use: TLS/HTTPS, encrypting symmetric keys (hybrid approach)</code></pre>
+
+                <h4>Production Encryption Setup</h4>
+                <p>
+                    Here's how we encrypt sensitive data in our database:
+                </p>
+
+                <pre><code>const crypto = require('crypto');
+
+// Encryption configuration
+const ALGORITHM = 'aes-256-gcm';  // AES-256 with authentication
+const KEY = process.env.ENCRYPTION_KEY;  // 32 bytes, from secure storage
+
+// Encrypt data
+function encrypt(plaintext) {
+    // Generate random IV (initialization vector) for each encryption
+    // CRITICAL: Never reuse the same IV with the same key!
+    const iv = crypto.randomBytes(16);
+
+    const cipher = crypto.createCipheriv(ALGORITHM, KEY, iv);
+
+    let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+
+    // Get authentication tag (GCM mode provides this)
+    const authTag = cipher.getAuthTag();
+
+    // Return IV + authTag + ciphertext (all needed for decryption)
+    return {
+        iv: iv.toString('hex'),
+        authTag: authTag.toString('hex'),
+        ciphertext: encrypted
+    };
+}
+
+// Decrypt data
+function decrypt(encrypted) {
+    const decipher = crypto.createDecipheriv(
+        ALGORITHM,
+        KEY,
+        Buffer.from(encrypted.iv, 'hex')
+    );
+
+    decipher.setAuthTag(Buffer.from(encrypted.authTag, 'hex'));
+
+    let decrypted = decipher.update(encrypted.ciphertext, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
+}
+
+// Usage in database operations
+async function saveUserSSN(userId, ssn) {
+    const encrypted = encrypt(ssn);
+
+    await db.users.update(
+        { id: userId },
+        {
+            ssn_ciphertext: encrypted.ciphertext,
+            ssn_iv: encrypted.iv,
+            ssn_auth_tag: encrypted.authTag
+        }
+    );
+}
+
+async function getUserSSN(userId) {
+    const user = await db.users.findOne({ id: userId });
+
+    if (!user.ssn_ciphertext) {
+        return null;
+    }
+
+    const encrypted = {
+        ciphertext: user.ssn_ciphertext,
+        iv: user.ssn_iv,
+        authTag: user.ssn_auth_tag
+    };
+
+    return decrypt(encrypted);
+}</code></pre>
+
+                <h4>Key Management (The Hard Part)</h4>
+                <p>
+                    Encryption is only as secure as your key management. Here's what we learned the hard way:
+                </p>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Approach</th>
+                            <th>Security Level</th>
+                            <th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Hardcoded in code</td>
+                            <td>❌ TERRIBLE</td>
+                            <td>Committed to Git, visible to everyone</td>
+                        </tr>
+                        <tr>
+                            <td>Environment variables</td>
+                            <td>⚠️ WEAK</td>
+                            <td>Better, but visible in process list</td>
+                        </tr>
+                        <tr>
+                            <td>Config files on disk</td>
+                            <td>⚠️ WEAK</td>
+                            <td>Better with strict permissions, but still risky</td>
+                        </tr>
+                        <tr>
+                            <td>AWS Secrets Manager</td>
+                            <td>✓ GOOD</td>
+                            <td>Rotation, audit logs, IAM permissions</td>
+                        </tr>
+                        <tr>
+                            <td>HashiCorp Vault</td>
+                            <td>✓✓ BETTER</td>
+                            <td>Dynamic secrets, lease management</td>
+                        </tr>
+                        <tr>
+                            <td>AWS KMS / Cloud HSM</td>
+                            <td>✓✓✓ BEST</td>
+                            <td>Keys never leave HSM, FIPS 140-2 compliant</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>The Production Incident:</strong>
+                    We stored the encryption key in an environment variable. A developer ran <code>printenv</code> and pasted the output in a Slack channel for debugging. The key was in there. We rotated all keys, re-encrypted all data, and implemented AWS Secrets Manager. Total time: 12 hours of downtime. Don't be us.
+                </div>
+
+                <h4>Encryption at Different Layers</h4>
+                <pre><code>// 1. Application-Level Encryption (Field-level)
+// Encrypt specific fields before storing
+const user = {
+    email: "user@example.com",      // Plaintext (need to search)
+    name: "John Doe",                // Plaintext
+    ssn: encrypt("123-45-6789"),     // Encrypted
+    dob: encrypt("1980-01-01")       // Encrypted
+};
+
+// 2. Database-Level Encryption (Transparent Data Encryption - TDE)
+// Database encrypts entire database file automatically
+// Pros: No code changes
+// Cons: All or nothing, performance overhead
+
+// 3. Disk-Level Encryption
+// OS encrypts entire disk
+// Protects against physical theft, not application-level breaches
+
+// 4. In-Transit Encryption (TLS)
+// HTTPS, TLS connections between services
+// Protects data while moving across network</code></pre>
+
+                <h4>When to Encrypt What</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Data Type</th>
+                            <th>Approach</th>
+                            <th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Passwords</td>
+                            <td>Hash (bcrypt/Argon2)</td>
+                            <td>Never need to decrypt</td>
+                        </tr>
+                        <tr>
+                            <td>SSN, Tax ID</td>
+                            <td>Encrypt (AES-256)</td>
+                            <td>Need for reporting, verification</td>
+                        </tr>
+                        <tr>
+                            <td>Credit Cards</td>
+                            <td>Tokenize</td>
+                            <td>Let payment processor handle it</td>
+                        </tr>
+                        <tr>
+                            <td>API Keys</td>
+                            <td>Hash (SHA-256)</td>
+                            <td>Show user once, verify later</td>
+                        </tr>
+                        <tr>
+                            <td>Email, Phone</td>
+                            <td>Plaintext or hash for search</td>
+                            <td>Need to query/search these</td>
+                        </tr>
+                        <tr>
+                            <td>Health Records</td>
+                            <td>Encrypt (AES-256)</td>
+                            <td>HIPAA compliance</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <button class="collapsible">Tokenization: Replace Sensitive Data with Tokens</button>
+            <div class="collapsible-content">
+                <h3>What It Is</h3>
+                <p>
+                    Tokenization replaces sensitive data with a non-sensitive token. The real data is stored in a secure vault. Your system only handles tokens. Perfect for credit cards, PII, and compliance scenarios.
+                </p>
+
+                <h4>How It Works</h4>
+                <pre><code>WITHOUT TOKENIZATION (Risky)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+User enters: "4111-1111-1111-1111"
+              ↓
+Your app stores: "4111-1111-1111-1111" (encrypted)
+Your database: "4111-1111-1111-1111" (encrypted)
+Your logs: "Processing card 4111..." ❌ LEAKED!
+Your Kafka events: Contains full card number ❌ RISKY!
+
+Problem: Card data everywhere, PCI-DSS scope = entire infrastructure
+
+
+WITH TOKENIZATION (Secure)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+User enters: "4111-1111-1111-1111"
+              ↓
+Tokenization service: "tok_1a2b3c4d5e6f"
+              ↓
+Your app stores: "tok_1a2b3c4d5e6f"
+Your database: "tok_1a2b3c4d5e6f"
+Your logs: "Processing card tok_1a2b..." ✓ Safe!
+Your Kafka events: Contains only token ✓ Compliant!
+
+Real card: Stored in Stripe/Braintree/etc (they handle PCI-DSS)
+PCI-DSS scope: Minimal (just the tokenization call)</code></pre>
+
+                <h4>Real Implementation with Stripe</h4>
+                <pre><code>// Frontend: Tokenize credit card (never send to your server!)
+const stripe = Stripe('pk_live_...');
+
+async function handlePayment() {
+    // Stripe.js creates token from card details
+    // Card data never touches your server!
+    const {token, error} = await stripe.createToken(cardElement);
+
+    if (error) {
+        console.error('Tokenization failed', error);
+        return;
+    }
+
+    // Send ONLY the token to your backend
+    await fetch('/api/process-payment', {
+        method: 'POST',
+        body: JSON.stringify({
+            token: token.id,  // "tok_1a2b3c4d5e6f"
+            amount: 5000      // $50.00
+        })
+    });
+}
+
+// Backend: Process payment using token
+async function processPayment(req, res) {
+    const {token, amount} = req.body;
+
+    // Your server NEVER sees the card number
+    // You only have the token
+    const charge = await stripe.charges.create({
+        amount: amount,
+        currency: 'usd',
+        source: token,  // Use token instead of card
+        description: 'Order payment'
+    });
+
+    // Store ONLY the token, never the card
+    await db.orders.insert({
+        user_id: req.user.id,
+        stripe_token: token,       // Safe to store
+        stripe_charge_id: charge.id,
+        amount: amount,
+        created_at: new Date()
+    });
+
+    res.json({ success: true, charge_id: charge.id });
+}
+
+// Later: Charge the same card again (subscription, refund, etc.)
+async function chargeStoredCard(orderId) {
+    const order = await db.orders.findOne({ id: orderId });
+
+    // Use the stored token for future charges
+    const charge = await stripe.charges.create({
+        amount: 1000,
+        currency: 'usd',
+        source: order.stripe_token  // Reuse token
+    });
+
+    return charge;
+}</code></pre>
+
+                <h4>Tokenization vs Encryption</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Tokenization</th>
+                            <th>Encryption</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Data storage</td>
+                            <td>External vault (Stripe, etc.)</td>
+                            <td>Your database (encrypted)</td>
+                        </tr>
+                        <tr>
+                            <td>Reversible?</td>
+                            <td>Yes (via vault API)</td>
+                            <td>Yes (with decryption key)</td>
+                        </tr>
+                        <tr>
+                            <td>Key management</td>
+                            <td>Handled by vendor</td>
+                            <td>Your responsibility</td>
+                        </tr>
+                        <tr>
+                            <td>Format preserving?</td>
+                            <td>Can be (optional)</td>
+                            <td>No (random bytes)</td>
+                        </tr>
+                        <tr>
+                            <td>Compliance scope</td>
+                            <td>Minimal (vendor handles it)</td>
+                            <td>Full (you handle it)</td>
+                        </tr>
+                        <tr>
+                            <td>Cost</td>
+                            <td>Vendor fees</td>
+                            <td>Infrastructure + labor</td>
+                        </tr>
+                        <tr>
+                            <td>Best for</td>
+                            <td>Credit cards, PCI-DSS</td>
+                            <td>SSN, health records</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box important">
+                    <strong>Why We Switched to Tokenization:</strong>
+                    We were encrypting credit cards in our database for a marketplace app. PCI-DSS audit found that our entire infrastructure was in scope—database, backups, logging, Kafka, even developer laptops. Cost to become compliant: $500K+. We switched to Stripe tokenization. Now only the payment page is in scope. Audit cost: $20K. Easy decision.
+                </div>
+
+                <h4>Format-Preserving Tokenization</h4>
+                <p>
+                    Sometimes you need the token to look like the original data (for legacy systems):
+                </p>
+
+                <pre><code>// Standard tokenization
+Card: "4111-1111-1111-1111"
+Token: "tok_1a2b3c4d5e6f"
+// Problem: Database expects 16-digit number, token is different format
+
+// Format-preserving tokenization
+Card: "4111-1111-1111-1111"
+Token: "4000-5555-2222-3333"  // Still looks like a card number!
+// Benefit: Legacy systems don't need changes</code></pre>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Securing Data in Transit</h2>
+
+            <button class="collapsible">REST APIs and HTTPS</button>
+            <div class="collapsible-content">
+                <h3>The Bare Minimum: TLS Everywhere</h3>
+                <p>
+                    If you take away one thing from this entire guide: <strong>ALWAYS use HTTPS</strong>. No exceptions. Not even for "internal" APIs. Here's why:
+                </p>
+
+                <pre><code>HTTP (Unencrypted) - Anyone can see this:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+POST /api/login HTTP/1.1
+Host: yourapp.com
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "MySecretPassword123"    ← Visible in plaintext!
+}
+
+An attacker on the network sees:
+✓ Username
+✓ Password
+✓ Session tokens
+✓ Everything
+
+
+HTTPS (TLS 1.3) - Encrypted:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16 03 03 00 5a c9 8f 2e a4 5b 7c 3d 9f 2e...  ← Gibberish to attackers
+
+Attacker sees:
+✗ Cannot read request body
+✗ Cannot read headers
+✗ Only knows you're talking to yourapp.com (domain visible)
+✓ Cannot modify data (integrity protection)</code></pre>
+
+                <div class="info-box warning">
+                    <strong>The "Internal Network" Myth:</strong>
+                    A company I worked with didn't use HTTPS for internal APIs because "it's all on our private network." Then a contractor connected to the office Wi-Fi and ran Wireshark. He captured API tokens, database credentials, and customer PII in 5 minutes. Internal networks are NOT safe. Use HTTPS everywhere.
+                </div>
+
+                <h4>TLS Configuration That Doesn't Suck</h4>
+                <pre><code>// Node.js/Express with proper TLS
+const https = require('https');
+const fs = require('fs');
+
+const options = {
+    key: fs.readFileSync('/path/to/private-key.pem'),
+    cert: fs.readFileSync('/path/to/certificate.pem'),
+
+    // Use modern TLS only
+    minVersion: 'TLSv1.3',
+    maxVersion: 'TLSv1.3',
+
+    // Strong cipher suites only
+    ciphers: [
+        'TLS_AES_256_GCM_SHA384',
+        'TLS_CHACHA20_POLY1305_SHA256',
+        'TLS_AES_128_GCM_SHA256'
+    ].join(':'),
+
+    // Prefer server cipher order
+    honorCipherOrder: true
+};
+
+https.createServer(options, app).listen(443);
+
+// Nginx configuration
+server {
+    listen 443 ssl http2;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    # Modern TLS only
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256';
+
+    # HSTS: Force HTTPS for 1 year
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Certificate stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+}</code></pre>
+
+                <h4>Mutual TLS (mTLS) for Service-to-Service</h4>
+                <p>
+                    For internal services talking to each other, add client certificate authentication:
+                </p>
+
+                <pre><code>// Server: Require client certificate
+const options = {
+    key: serverKey,
+    cert: serverCert,
+    ca: [caCert],  // Certificate authority
+    requestCert: true,  // Request client cert
+    rejectUnauthorized: true  // Reject if invalid
+};
+
+// Client: Provide certificate
+const options = {
+    key: clientKey,
+    cert: clientCert,
+    ca: [caCert]
+};
+
+const req = https.request('https://internal-api.com', options);
+
+// Now both sides are authenticated!
+// Server knows which service is calling
+// Client knows it's talking to the real server</code></pre>
+
+                <h4>Headers That Matter</h4>
+                <pre><code>// Security headers for all responses
+app.use((req, res, next) => {
+    // Prevent HTTPS downgrade attacks
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+
+    // Prevent MIME type sniffing
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    // Prevent clickjacking
+    res.setHeader('X-Frame-Options', 'DENY');
+
+    // Control referrer info
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+    // Content Security Policy (adjust per app)
+    res.setHeader('Content-Security-Policy', "default-src 'self'");
+
+    next();
+});</code></pre>
+            </div>
+
+            <button class="collapsible">API Authentication and Authorization</button>
+            <div class="collapsible-content">
+                <h3>Protecting API Endpoints</h3>
+                <p>
+                    HTTPS encrypts the channel, but you still need to authenticate who's calling and authorize what they can do:
+                </p>
+
+                <h4>Authentication Methods</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Security</th>
+                            <th>Use Case</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Basic Auth (username:password)</td>
+                            <td>⚠️ Weak</td>
+                            <td>Dev/staging only (with HTTPS)</td>
+                        </tr>
+                        <tr>
+                            <td>API Keys</td>
+                            <td>✓ OK</td>
+                            <td>Server-to-server, public APIs</td>
+                        </tr>
+                        <tr>
+                            <td>JWT Bearer Tokens</td>
+                            <td>✓✓ Good</td>
+                            <td>User sessions, SPAs</td>
+                        </tr>
+                        <tr>
+                            <td>OAuth 2.0</td>
+                            <td>✓✓✓ Best</td>
+                            <td>Third-party access, delegated auth</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <pre><code>// Example: JWT-based API auth
+const jwt = require('jsonwebtoken');
+
+// Middleware to protect routes
+function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing or invalid token' });
+    }
+
+    const token = authHeader.substring(7);  // Remove "Bearer "
+
+    try {
+        // Verify JWT signature and expiration
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Attach user info to request
+        req.user = payload;
+        next();
+
+    } catch (error) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+}
+
+// Protected endpoint
+app.get('/api/user/profile', requireAuth, async (req, res) => {
+    const user = await db.users.findOne({ id: req.user.userId });
+    res.json(user);
+});
+
+// Authorization: Check permissions
+function requireAdmin(req, res, next) {
+    if (!req.user.roles.includes('admin')) {
+        return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
+    next();
+}
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+    // Only admins can delete users
+    await db.users.delete({ id: req.params.id });
+    res.json({ success: true });
+});</code></pre>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Securing Data at Rest</h2>
+
+            <button class="collapsible">Database Encryption Strategies</button>
+            <div class="collapsible-content">
+                <h3>Layers of Defense</h3>
+                <p>
+                    Database security isn't one technique—it's multiple layers working together:
+                </p>
+
+                <pre><code>Layer 1: Disk Encryption
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Entire disk encrypted by OS (LUKS, BitLocker, etc.)
+Protects: Physical theft of hard drives
+Doesn't protect: Application-level breaches, SQL injection
+
+
+Layer 2: Transparent Data Encryption (TDE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Database encrypts data files automatically
+Protects: Backup theft, file system access
+Doesn't protect: Authenticated database users, SQL injection
+
+
+Layer 3: Column-Level Encryption
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Application encrypts specific columns before insert
+Protects: Everything except your application code
+Trade-off: Can't query encrypted columns efficiently
+
+
+Layer 4: Application-Level Access Controls
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Role-based permissions, audit logging
+Protects: Unauthorized access by internal users
+Essential: Always log who accessed sensitive data</code></pre>
+
+                <h4>PostgreSQL Column Encryption Example</h4>
+                <pre><code>-- Database schema
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,  -- Plaintext (need to query)
+    name VARCHAR(255),             -- Plaintext
+    ssn_encrypted BYTEA,           -- Encrypted
+    ssn_iv BYTEA,                  -- IV for decryption
+    ssn_auth_tag BYTEA,            -- Authentication tag
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Application code (Node.js)
+async function saveUser(email, name, ssn) {
+    const encrypted = encrypt(ssn);  // Our encryption function
+
+    await db.query(`
+        INSERT INTO users (email, name, ssn_encrypted, ssn_iv, ssn_auth_tag)
+        VALUES ($1, $2, $3, $4, $5)
+    `, [
+        email,
+        name,
+        encrypted.ciphertext,
+        encrypted.iv,
+        encrypted.authTag
+    ]);
+}
+
+async function getUser(userId) {
+    const result = await db.query(`
+        SELECT * FROM users WHERE id = $1
+    `, [userId]);
+
+    const user = result.rows[0];
+
+    // Decrypt SSN only when needed
+    if (user.ssn_encrypted) {
+        user.ssn = decrypt({
+            ciphertext: user.ssn_encrypted,
+            iv: user.ssn_iv,
+            authTag: user.ssn_auth_tag
+        });
+    }
+
+    // Remove encrypted fields from response
+    delete user.ssn_encrypted;
+    delete user.ssn_iv;
+    delete user.ssn_auth_tag;
+
+    return user;
+}</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Search vs Security Trade-off:</strong>
+                    You can't search encrypted data efficiently (without decrypting everything). Solutions: (1) Keep searchable fields in plaintext, encrypt the rest. (2) Use tokenization with a searchable vault. (3) Use homomorphic encryption (complex, slow). We usually go with option 1—encrypt SSN, leave email searchable.
+                </div>
+
+                <h4>MongoDB Encryption at Rest</h4>
+                <pre><code>// MongoDB with field-level encryption (Client-Side Field Level Encryption)
+const { MongoClient, ClientEncryption } = require('mongodb');
+
+const client = new MongoClient(uri, {
+    autoEncryption: {
+        keyVaultNamespace: 'encryption.__keyVault',
+        kmsProviders: {
+            aws: {
+                accessKeyId: process.env.AWS_ACCESS_KEY,
+                secretAccessKey: process.env.AWS_SECRET_KEY
+            }
+        },
+        schemaMap: {
+            'mydb.users': {
+                bsonType: 'object',
+                encryptMetadata: {
+                    keyId: [dataKeyId]
+                },
+                properties: {
+                    ssn: {
+                        encrypt: {
+                            bsonType: 'string',
+                            algorithm: 'AEAD_AES_256_CBC_HMAC_SHA_512-Deterministic'
+                        }
+                    }
+                }
+            }
+        }
+    }
+});
+
+// Insert - SSN automatically encrypted
+await db.collection('users').insertOne({
+    email: 'user@example.com',
+    ssn: '123-45-6789'  // Automatically encrypted before storage
+});
+
+// Query - SSN automatically decrypted
+const user = await db.collection('users').findOne({ email: 'user@example.com' });
+console.log(user.ssn);  // "123-45-6789" (decrypted)</code></pre>
+
+                <h4>Access Control and Audit Logging</h4>
+                <pre><code>// Track who accessed sensitive data
+async function getUserSSN(requestingUserId, targetUserId) {
+    // Check permissions
+    const requester = await db.users.findOne({ id: requestingUserId });
+
+    if (!requester.roles.includes('admin') && requestingUserId !== targetUserId) {
+        // Log unauthorized attempt
+        await db.audit_log.insert({
+            event: 'UNAUTHORIZED_ACCESS_ATTEMPT',
+            user_id: requestingUserId,
+            target_user_id: targetUserId,
+            resource: 'SSN',
+            timestamp: new Date()
+        });
+
+        throw new Error('Forbidden');
+    }
+
+    // Fetch SSN
+    const user = await db.users.findOne({ id: targetUserId });
+    const ssn = decrypt(user.ssn_encrypted);
+
+    // Log successful access
+    await db.audit_log.insert({
+        event: 'SENSITIVE_DATA_ACCESS',
+        user_id: requestingUserId,
+        target_user_id: targetUserId,
+        resource: 'SSN',
+        timestamp: new Date()
+    });
+
+    return ssn;
+}
+
+// Regularly review audit logs
+SELECT user_id, COUNT(*) as access_count
+FROM audit_log
+WHERE event = 'SENSITIVE_DATA_ACCESS'
+  AND resource = 'SSN'
+  AND timestamp > NOW() - INTERVAL '24 hours'
+GROUP BY user_id
+HAVING COUNT(*) > 100  -- Flag suspicious activity
+ORDER BY access_count DESC;</code></pre>
+            </div>
+
+            <button class="collapsible">Securing Backups</button>
+            <div class="collapsible-content">
+                <h3>Don't Forget About Backups</h3>
+                <p>
+                    I've seen companies encrypt production databases but leave backups unencrypted. Backups are often the weakest link:
+                </p>
+
+                <h4>Backup Encryption Checklist</h4>
+                <pre><code>✓ Encrypt backups before uploading to S3/Cloud Storage
+✓ Use separate encryption keys from production
+✓ Store encryption keys in different location than backups
+✓ Test backup restoration regularly (encrypted → decrypted → restored)
+✓ Rotate backup encryption keys annually
+✓ Set lifecycle policies (auto-delete old backups)
+✓ Restrict backup access (separate IAM role, minimal permissions)
+✓ Enable versioning (protect against accidental deletion)</code></pre>
+
+                <h4>Example: Encrypted Database Backup</h4>
+                <pre><code>#!/bin/bash
+
+# PostgreSQL backup with encryption
+
+# 1. Dump database
+pg_dump -U postgres mydb > /tmp/backup.sql
+
+# 2. Encrypt backup
+openssl enc -aes-256-cbc \
+    -salt \
+    -in /tmp/backup.sql \
+    -out /tmp/backup.sql.enc \
+    -pass pass:$BACKUP_ENCRYPTION_KEY
+
+# 3. Upload to S3 with server-side encryption
+aws s3 cp /tmp/backup.sql.enc \
+    s3://my-backups/db/backup-$(date +%Y%m%d).sql.enc \
+    --sse aws:kms \
+    --sse-kms-key-id $KMS_KEY_ID
+
+# 4. Clean up
+rm /tmp/backup.sql /tmp/backup.sql.enc
+
+# 5. Verify backup
+aws s3 ls s3://my-backups/db/backup-$(date +%Y%m%d).sql.enc</code></pre>
+
+                <div class="info-box warning">
+                    <strong>The Backup Breach:</strong>
+                    A SaaS company had a misconfigured S3 bucket. Their encrypted production database was secure. But their backups were uploaded to S3 without encryption. Bucket was public. 500K user records exposed. Always encrypt backups, always check bucket permissions.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Securing Data in Kafka</h2>
+
+            <button class="collapsible">Kafka Encryption: In-Transit and At-Rest</button>
+            <div class="collapsible-content">
+                <h3>Encrypting the Event Stream</h3>
+                <p>
+                    Kafka handles high-throughput data. You need encryption without killing performance. Here's the layered approach:
+                </p>
+
+                <pre><code>Layer 1: TLS for In-Transit
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Producer ──TLS──▶ Broker ──TLS──▶ Consumer
+         Encrypted      Encrypted
+
+# Kafka broker config
+listeners=SSL://kafka1:9093
+ssl.keystore.location=/var/kafka/ssl/server.keystore.jks
+ssl.keystore.password=<password>
+ssl.key.password=<password>
+ssl.truststore.location=/var/kafka/ssl/server.truststore.jks
+ssl.truststore.password=<password>
+ssl.client.auth=required  # mTLS
+
+
+Layer 2: Disk Encryption for At-Rest
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Kafka logs on disk: /var/kafka/data/
+Encrypt entire volume: LUKS, dm-crypt, or cloud provider encryption
+
+Protects: Physical access to disks, stolen backups
+Doesn't protect: Kafka clients, compromised broker
+
+
+Layer 3: Application-Level Field Encryption
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Encrypt sensitive fields BEFORE sending to Kafka
+
+Event: {
+  "user_id": "12345",                  // Plaintext (for routing)
+  "action": "purchase",                 // Plaintext (for filtering)
+  "ssn": "a8f7b2c9d4...",              // Encrypted!
+  "credit_card": "tok_1a2b3c4d5e6f"    // Tokenized!
+}
+
+Protects: Everything (even compromised Kafka cluster)
+Trade-off: Can't filter/process encrypted fields in Kafka</code></pre>
+
+                <h4>Producer-Side Field Encryption</h4>
+                <pre><code>// Encrypt sensitive fields before publishing to Kafka
+async function publishOrderEvent(order) {
+    // Encrypt PII fields
+    const encryptedSSN = encrypt(order.ssn);
+    const encryptedDOB = encrypt(order.dob);
+
+    const event = {
+        event_type: 'order.created',
+        user_id: order.user_id,       // Plaintext (for partitioning)
+        order_id: order.order_id,      // Plaintext (for tracking)
+        amount: order.amount,          // Plaintext (for analytics)
+
+        // Encrypted fields
+        ssn_encrypted: encryptedSSN.ciphertext,
+        ssn_iv: encryptedSSN.iv,
+        ssn_auth_tag: encryptedSSN.authTag,
+
+        dob_encrypted: encryptedDOB.ciphertext,
+        dob_iv: encryptedDOB.iv,
+        dob_auth_tag: encryptedDOB.authTag,
+
+        timestamp: new Date().toISOString()
+    };
+
+    await kafkaProducer.send({
+        topic: 'orders',
+        key: order.user_id,
+        value: JSON.stringify(event)
+    });
+}
+
+// Consumer-side decryption
+kafkaConsumer.on('message', async (message) => {
+    const event = JSON.parse(message.value);
+
+    // Decrypt only if needed for processing
+    if (event.ssn_encrypted) {
+        const ssn = decrypt({
+            ciphertext: event.ssn_encrypted,
+            iv: event.ssn_iv,
+            authTag: event.ssn_auth_tag
+        });
+
+        // Use decrypted SSN
+        await processOrder(event.order_id, ssn);
+
+        // Clear from memory
+        ssn = null;
+    }
+});</code></pre>
+
+                <h4>Schema Registry with Encryption</h4>
+                <p>
+                    Use Confluent Schema Registry to enforce encryption for specific fields:
+                </p>
+
+                <pre><code>{
+  "type": "record",
+  "name": "OrderEvent",
+  "fields": [
+    {
+      "name": "order_id",
+      "type": "string"
+    },
+    {
+      "name": "ssn",
+      "type": "string",
+      "confluent:tags": ["PII", "ENCRYPT"]  // Mark for encryption
+    },
+    {
+      "name": "amount",
+      "type": "double"
+    }
+  ]
+}</code></pre>
+
+                <div class="info-box important">
+                    <strong>The Kafka Data Leak:</strong>
+                    A company published user events to Kafka with full PII in plaintext. Kafka retention was 30 days. An intern wrote a consumer to debug issues and saved messages to a CSV file on his laptop. Laptop was stolen. 30 days × 100K events/day = 3M user records exposed. Always encrypt PII before publishing, even to internal Kafka.
+                </div>
+            </div>
+
+            <button class="collapsible">Kafka Access Control and ACLs</button>
+            <div class="collapsible-content">
+                <h3>Who Can Read/Write What?</h3>
+                <p>
+                    Encryption protects data at rest and in transit. ACLs prevent unauthorized access:
+                </p>
+
+                <pre><code># Enable ACLs in Kafka
+authorizer.class.name=kafka.security.authorizer.AclAuthorizer
+allow.everyone.if.no.acl.found=false  # Deny by default!
+
+# Grant producer permission
+kafka-acls --add \
+  --allow-principal User:order-service \
+  --operation Write \
+  --topic orders
+
+# Grant consumer permission
+kafka-acls --add \
+  --allow-principal User:analytics-service \
+  --operation Read \
+  --topic orders \
+  --group analytics-group
+
+# Deny specific user
+kafka-acls --add \
+  --deny-principal User:untrusted-service \
+  --operation All \
+  --topic orders
+
+# List all ACLs
+kafka-acls --list --topic orders</code></pre>
+
+                <h4>SASL Authentication</h4>
+                <pre><code># Kafka broker: Enable SASL/SCRAM
+listeners=SASL_SSL://kafka1:9093
+security.inter.broker.protocol=SASL_SSL
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.enabled.mechanisms=SCRAM-SHA-512
+
+# Create users
+kafka-configs --alter \
+  --add-config 'SCRAM-SHA-512=[password=secret123]' \
+  --entity-type users \
+  --entity-name order-service
+
+# Producer config
+props.put("security.protocol", "SASL_SSL");
+props.put("sasl.mechanism", "SCRAM-SHA-512");
+props.put("sasl.jaas.config",
+    "org.apache.kafka.common.security.scram.ScramLoginModule required " +
+    "username=\"order-service\" password=\"secret123\";");
+
+// Now producers must authenticate before publishing!</code></pre>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Production War Stories</h2>
+
+            <button class="collapsible">The $3M Data Breach</button>
+            <div class="collapsible-content">
+                <h3>When Security Theater Fails</h3>
+                <p>
+                    <strong>The Setup:</strong> Healthcare startup, 2 million patient records. They had "security":
+                </p>
+                <ul>
+                    <li>Passwords hashed with MD5 (no salt)</li>
+                    <li>SSNs encrypted with AES... key hardcoded in the source code</li>
+                    <li>API used HTTPS, but internal database connections over HTTP</li>
+                    <li>Kafka topics with full PHI, no encryption, no ACLs</li>
+                    <li>Backups uploaded to S3, unencrypted, bucket permissions too permissive</li>
+                </ul>
+
+                <p>
+                    <strong>The Breach:</strong> Former employee still had database credentials (never rotated). Downloaded backups from S3 (publicly readable). Decrypted SSNs using key from public GitHub repo. Cracked 70% of passwords with rainbow tables.
+                </p>
+
+                <p>
+                    <strong>The Aftermath:</strong>
+                </p>
+                <ul>
+                    <li>$2M HIPAA fine</li>
+                    <li>$1M+ in legal fees and breach notification</li>
+                    <li>Company shut down within 6 months</li>
+                </ul>
+
+                <p>
+                    <strong>What Should Have Been Done:</strong>
+                </p>
+                <pre><code>✓ Bcrypt/Argon2 for passwords (not MD5)
+✓ Encryption keys in AWS Secrets Manager, rotated quarterly
+✓ TLS for ALL connections (DB, Kafka, internal APIs)
+✓ Field-level encryption for PHI in Kafka
+✓ Encrypted backups with separate keys
+✓ S3 buckets with strict IAM policies, no public access
+✓ Credential rotation on employee offboarding
+✓ Regular security audits
+
+Cost of proper security: ~$50K/year
+Cost of the breach: $3M + business failure</code></pre>
+            </div>
+
+            <button class="collapsible">The Log File That Contained Everything</button>
+            <div class="collapsible-content">
+                <h3>When Logging Defeats Security</h3>
+                <p>
+                    <strong>What happened:</strong> E-commerce site with PCI-DSS compliant payment processing. Credit cards tokenized via Stripe. Database encrypted. HTTPS everywhere. Perfect, right?
+                </p>
+
+                <p>
+                    Then a developer added debug logging:
+                </p>
+
+                <pre><code>// Debugging payment issues
+app.post('/api/payment', (req, res) => {
+    console.log('Payment request:', JSON.stringify(req.body));
+    // ^^^^^ Logged full request body
+
+    const {cardNumber, cvv, expiry} = req.body;
+    // Process payment...
+});
+
+// Logs contained:
+// "cardNumber": "4111-1111-1111-1111"
+// "cvv": "123"
+// "expiry": "12/25"</code></pre>
+
+                <p>
+                    Logs were shipped to CloudWatch, retained for 90 days. Developers had access to CloudWatch for debugging. One developer's laptop was compromised. Attacker scraped logs, extracted 50K credit cards.
+                </p>
+
+                <p>
+                    <strong>The Fix:</strong>
+                </p>
+                <pre><code>// Sanitize logs automatically
+const sanitize = (obj) => {
+    const sensitive = ['password', 'cardNumber', 'cvv', 'ssn', 'token'];
+    const cleaned = {...obj};
+
+    for (let key in cleaned) {
+        if (sensitive.some(s => key.toLowerCase().includes(s))) {
+            cleaned[key] = '[REDACTED]';
+        }
+    }
+
+    return cleaned;
+};
+
+// Safe logging
+console.log('Payment request:', JSON.stringify(sanitize(req.body)));
+
+// Output:
+// "cardNumber": "[REDACTED]"
+// "cvv": "[REDACTED]"
+// "amount": "99.99"  ✓ Safe to log</code></pre>
+
+                <div class="info-box warning">
+                    <strong>Lesson:</strong>
+                    Encryption and tokenization don't matter if you log sensitive data in plaintext. Always sanitize logs. Never log passwords, credit cards, SSNs, API keys, or tokens. Use log scrubbing middleware. Review logs regularly for leaks.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Best Practices Checklist</h2>
+
+            <h3>Data in Transit</h3>
+            <pre><code>✓ HTTPS/TLS 1.3 for ALL external APIs
+✓ mTLS for service-to-service communication
+✓ Disable TLS 1.0, 1.1, 1.2 (use TLS 1.3 only)
+✓ Strong cipher suites only (no RC4, 3DES, etc.)
+✓ Certificate pinning for mobile apps
+✓ HSTS headers (Strict-Transport-Security)
+✓ Encrypt Kafka traffic (producer → broker → consumer)
+✓ VPN or private network for internal services</code></pre>
+
+            <h3>Data at Rest</h3>
+            <pre><code>✓ Hash passwords with bcrypt/Argon2 (never MD5/SHA-1)
+✓ Encrypt PII with AES-256-GCM
+✓ Tokenize credit cards (use Stripe, Braintree, etc.)
+✓ Store encryption keys in Secrets Manager/Vault
+✓ Rotate encryption keys quarterly
+✓ Encrypt database backups
+✓ Enable TDE (Transparent Data Encryption) if available
+✓ Encrypt Kafka log segments on disk
+✓ Use encrypted volumes for databases</code></pre>
+
+            <h3>Application Security</h3>
+            <pre><code>✓ Never log sensitive data (passwords, cards, SSNs)
+✓ Sanitize logs automatically
+✓ Clear sensitive data from memory after use
+✓ Validate input (prevent SQL injection, XSS)
+✓ Use parameterized queries (no string concatenation)
+✓ Implement rate limiting (prevent brute force)
+✓ Add audit logging for sensitive data access
+✓ Review audit logs weekly for anomalies
+✓ Rotate credentials on employee offboarding
+✓ Use least-privilege IAM roles</code></pre>
+
+            <h3>Compliance</h3>
+            <pre><code>✓ Identify which regulations apply (PCI-DSS, HIPAA, GDPR, SOC 2)
+✓ Document data classification (public, internal, confidential, restricted)
+✓ Implement data retention policies
+✓ Enable data deletion/anonymization for GDPR
+✓ Conduct regular security audits
+✓ Pen test annually
+✓ Train developers on secure coding
+✓ Have an incident response plan</code></pre>
+        </section>
+
+        <section class="content-section">
+            <h2>Key Takeaways</h2>
+
+            <div class="info-box important">
+                <strong>If I could go back and tell myself five things before handling sensitive data:</strong>
+            </div>
+
+            <ol>
+                <li>
+                    <strong>Use the right tool for the job.</strong> Encoding is for transport, hashing is for verification, encryption is for reversible secrets, tokenization is for outsourcing security. Don't encrypt when you should hash. Don't hash when you should tokenize. Each has a purpose.
+                </li>
+                <li>
+                    <strong>Encryption is only as strong as key management.</strong> AES-256 doesn't matter if your key is in the code or environment variables. Use Secrets Manager, Vault, or KMS. Rotate keys regularly. Never commit keys to Git (use git-secrets to prevent this).
+                </li>
+                <li>
+                    <strong>Defense in depth.</strong> Don't rely on one layer. Use HTTPS, encrypt sensitive fields, hash passwords, tokenize cards, add ACLs, enable audit logging, sanitize logs. When one layer fails (and it will), others protect you.
+                </li>
+                <li>
+                    <strong>Compliance is cheaper than breaches.</strong> PCI-DSS seems expensive until you factor in breach costs. We spent $100K on Stripe tokenization to avoid $2M+ in PCI compliance. Best money we ever spent. Don't handle sensitive data yourself if you can avoid it.
+                </li>
+                <li>
+                    <strong>Logs will betray you.</strong> You can have perfect encryption everywhere, but one debug log statement with <code>JSON.stringify(req.body)</code> and your credit card numbers are in CloudWatch. Always sanitize logs. Review production logs regularly. Use automated log scrubbing.
+                </li>
+            </ol>
+
+            <p>
+                Security isn't about being perfect—it's about making it hard enough that attackers move on to easier targets. Use HTTPS everywhere, hash passwords with bcrypt, encrypt PII with AES-256, tokenize payment data, rotate keys, sanitize logs, and audit everything. Do these things and you're ahead of 90% of applications out there.
+            </p>
+        </section>
+
+        <section class="content-section">
+            <h2>Additional Resources</h2>
+            <ul>
+                <li><a href="https://owasp.org/www-project-top-ten/" target="_blank">OWASP Top 10 Security Risks</a></li>
+                <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html" target="_blank">OWASP Cryptographic Storage Cheat Sheet</a></li>
+                <li><a href="https://www.pcisecuritystandards.org/" target="_blank">PCI-DSS Standards</a></li>
+                <li><a href="https://www.hipaajournal.com/hipaa-encryption-requirements/" target="_blank">HIPAA Encryption Requirements</a></li>
+                <li><a href="https://cloud.google.com/security/encryption-at-rest" target="_blank">Google Cloud Encryption at Rest</a></li>
+                <li><a href="https://docs.aws.amazon.com/kms/latest/developerguide/overview.html" target="_blank">AWS Key Management Service (KMS)</a></li>
+                <li><a href="https://www.vaultproject.io/" target="_blank">HashiCorp Vault</a></li>
+            </ul>
+        </section>
+
+        <section class="content-section">
+            <h2>Related Topics</h2>
+            <div class="topics-grid">
+                <div class="topic-card">
+                    <h3>OAuth & OIDC</h3>
+                    <p>Learn about authentication and authorization patterns for securing API access.</p>
+                    <a href="../oauth/index.html" class="btn">Learn More →</a>
+                </div>
+                <div class="topic-card">
+                    <h3>Apache Kafka</h3>
+                    <p>Understand how to secure data flowing through event streaming platforms.</p>
+                    <a href="../kafka/index.html" class="btn">Learn More →</a>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 System Design Reference Guide | Your Personal Learning Resource</p>
+    </footer>
+
+    <script src="../js/main.js"></script>
+</body>
+</html>

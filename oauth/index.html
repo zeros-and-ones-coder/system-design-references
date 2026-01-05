@@ -1,0 +1,1052 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth 2.0 & OpenID Connect - System Design Guide</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-logo">System Design Guide</h1>
+            <button class="menu-toggle" aria-label="Toggle menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <ul class="nav-menu">
+                <li><a href="../index.html">Home</a></li>
+                <li><a href="../basics/index.html">Basics</a></li>
+                <li><a href="../kafka/index.html">Kafka</a></li>
+                <li><a href="../microservices/index.html">Microservices</a></li>
+                <li><a href="../oauth/index.html" class="active">OAuth & OIDC</a></li>
+                <li><a href="../data-security/index.html">Data Security</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="breadcrumb">
+            <a href="../index.html">Home</a>
+            <span>/</span>
+            <span>OAuth & OIDC</span>
+        </div>
+
+        <header class="hero">
+            <h1>OAuth 2.0 & OpenID Connect</h1>
+            <p class="subtitle">Real-world authentication and authorization patterns from the trenches</p>
+        </header>
+
+        <section class="content-section">
+            <h2>Introduction</h2>
+            <p>
+                Look, I've implemented OAuth and OIDC more times than I can count, and I'm going to tell you what I wish someone had told me on day one: OAuth is <strong>not</strong> authentication. I know, I know—everyone uses it for "Sign in with Google," but technically, OAuth 2.0 is an <em>authorization</em> framework. OpenID Connect (OIDC) is what actually handles authentication by sitting on top of OAuth.
+            </p>
+
+            <p>
+                Here's the thing—most developers (myself included, back in the day) try to build their own auth system first, realize it's a security nightmare, then scramble to implement OAuth. Save yourself the headache and just start with a proper identity provider from the beginning.
+            </p>
+
+            <div class="info-box important">
+                <strong>Principal Engineer Perspective:</strong>
+                In my last three projects, we've used Auth0, Okta, and AWS Cognito. The pattern is always the same: teams underestimate the complexity of identity management. Session handling, token refresh, MFA, account recovery, rate limiting, suspicious activity detection—this stuff is <em>hard</em>. Use a managed service unless you have a dedicated security team.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>High-Level Architecture</h2>
+
+            <h3>The 30,000-Foot View</h3>
+            <p>
+                Before we dive into the weeds, here's what a typical OAuth/OIDC flow looks like in a real system. This is from our e-commerce platform that handles ~2M users:
+            </p>
+
+            <pre><code>┌─────────────┐                                   ┌──────────────────┐
+│   Browser   │                                   │   Identity       │
+│   (User)    │                                   │   Provider       │
+└──────┬──────┘                                   │   (Auth0/Okta)   │
+       │                                          └────────┬─────────┘
+       │ 1. Click "Login"                                  │
+       ├──────────────────────────────────────────────────►│
+       │    GET /authorize?client_id=...&redirect_uri=...  │
+       │                                                    │
+       │ 2. User logs in (username/password/MFA)           │
+       │◄───────────────────────────────────────────────────┤
+       │                                                    │
+       │ 3. Redirect with auth code                        │
+       │◄───────────────────────────────────────────────────┤
+       │    https://yourapp.com/callback?code=AUTH_CODE    │
+       │                                                    │
+┌──────▼──────┐                                            │
+│  Your App   │                                            │
+│  Backend    │  4. Exchange code for tokens              │
+│             ├───────────────────────────────────────────►│
+│             │    POST /token                             │
+│             │    code=AUTH_CODE                          │
+│             │    client_secret=...                       │
+│             │                                            │
+│             │  5. Receive tokens                         │
+│             │◄───────────────────────────────────────────┤
+│             │    { access_token, id_token, refresh_token }
+│             │                                            │
+└─────────────┘                                            │
+
+Key Components:
+- access_token: Use this to call APIs (short-lived, ~1 hour)
+- id_token: JWT with user info (name, email, etc.)
+- refresh_token: Get new access tokens without re-login (long-lived)</code></pre>
+
+            <div class="info-box note">
+                <strong>Real Talk:</strong>
+                This diagram represents the Authorization Code Flow, which is what you want 99% of the time for web apps. There are other flows (Implicit, Client Credentials, PKCE), but if you're building a typical web application, start here.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Core Concepts Deep Dive</h2>
+
+            <button class="collapsible">OAuth 2.0 vs OpenID Connect (OIDC)</button>
+            <div class="collapsible-content">
+                <h3>The Difference That Matters</h3>
+                <p>
+                    I've seen so many teams get confused by this. Here's the clearest explanation I can give:
+                </p>
+
+                <ul>
+                    <li>
+                        <strong>OAuth 2.0:</strong> "Can I access this resource?" — It's about <em>authorization</em>. Think: "This app can read your Google Drive files."
+                    </li>
+                    <li>
+                        <strong>OpenID Connect:</strong> "Who are you?" — It's about <em>authentication</em>. Think: "You are john@example.com, and here's your name and profile picture."
+                    </li>
+                </ul>
+
+                <p>
+                    In practice, OIDC just adds an <code>id_token</code> (a JWT) to the OAuth flow. This token contains claims about the user's identity. That's literally it. OIDC is OAuth with some extra standardized fields.
+                </p>
+
+                <h3>The Tokens Explained</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Token</th>
+                            <th>Format</th>
+                            <th>Purpose</th>
+                            <th>Typical Lifetime</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Access Token</strong></td>
+                            <td>Opaque string or JWT</td>
+                            <td>Call APIs on user's behalf</td>
+                            <td>15 mins - 1 hour</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ID Token</strong></td>
+                            <td>Always JWT</td>
+                            <td>User identity info</td>
+                            <td>Same as access token</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Refresh Token</strong></td>
+                            <td>Opaque string</td>
+                            <td>Get new access tokens</td>
+                            <td>Days to months</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box tip">
+                    <strong>From Experience:</strong>
+                    Keep access tokens short-lived. We learned this the hard way when a developer accidentally committed an access token to GitHub. Because it expired in 15 minutes, the damage was minimal. If we'd used a long-lived token, we would've had a much bigger problem.
+                </div>
+            </div>
+
+            <button class="collapsible">Grant Types (Flows) - Which One Do I Use?</button>
+            <div class="collapsible-content">
+                <h3>The Decision Tree I Actually Use</h3>
+
+                <p><strong>1. Authorization Code Flow (with PKCE)</strong></p>
+                <p>
+                    Use this for: Web apps, mobile apps, SPAs — basically everything these days.
+                </p>
+                <pre><code>// This is what 90% of applications should use
+// PKCE = Proof Key for Code Exchange (makes it secure for public clients)
+
+User → Your App → Auth Provider → User Logs In → Auth Provider → Your App
+                                   ↓
+                        Authorization Code
+                                   ↓
+           Exchange code for tokens (with PKCE verifier)</code></pre>
+
+                <p><strong>Why PKCE matters:</strong> We had a mobile app that used the plain Authorization Code flow. A security audit found that the auth code could be intercepted on the device. PKCE fixes this by using a cryptographic challenge. Now it's part of OAuth 2.1 best practices.</p>
+
+                <p><strong>2. Client Credentials Flow</strong></p>
+                <p>
+                    Use this for: Server-to-server communication (no user involved).
+                </p>
+                <pre><code>// Example: Your backend calling another backend service
+POST /token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+client_id=your_service_id
+client_secret=your_service_secret
+scope=read:orders
+
+// You get back an access token (no user context)</code></pre>
+
+                <p>Real scenario: Our order processing service calls our inventory service. No user is involved—it's just service-to-service. Client Credentials is perfect here.</p>
+
+                <p><strong>3. Resource Owner Password Credentials (ROPC)</strong></p>
+                <div class="info-box warning">
+                    <strong>Warning:</strong>
+                    Don't use this unless you absolutely have to. This is where the user gives their username/password directly to your app. It breaks the whole point of OAuth (delegated access). The only time I've used this was for a legacy migration where we couldn't change the mobile app.
+                </div>
+
+                <p><strong>4. Implicit Flow</strong></p>
+                <div class="info-box warning">
+                    <strong>Deprecated:</strong>
+                    This used to be recommended for SPAs (single-page apps), but it's now considered insecure. Use Authorization Code Flow with PKCE instead. We migrated our React app from Implicit to PKCE in 2022—it was worth it.
+                </div>
+            </div>
+
+            <button class="collapsible">Scopes and Claims - The Authorization Model</button>
+            <div class="collapsible-content">
+                <h3>Scopes: What Can You Do?</h3>
+                <p>
+                    Scopes define permissions. Think of them as coarse-grained access controls.
+                </p>
+
+                <pre><code>// Common scopes in our system:
+openid              // Required for OIDC
+profile             // Get user's name, picture, etc.
+email               // Get user's email
+read:orders         // Can view orders
+write:orders        // Can create/update orders
+admin:users         // Can manage users (admin only)
+
+// Example: Request specific scopes during login
+GET /authorize?
+  client_id=abc123&
+  redirect_uri=https://yourapp.com/callback&
+  scope=openid profile email read:orders&
+  response_type=code</code></pre>
+
+                <p>
+                    <strong>Lesson learned:</strong> Start with broad scopes, then refine. We initially had just "read" and "write" scopes. As the system grew, we needed "read:own_orders" vs "read:all_orders". Don't over-engineer scopes early—you'll waste time on permissions nobody needs yet.
+                </p>
+
+                <h3>Claims: Who Are You?</h3>
+                <p>
+                    Claims are the actual data about the user, stored in the ID token (JWT). Here's what a decoded ID token looks like:
+                </p>
+
+                <pre><code>{
+  "iss": "https://auth.yourcompany.com",           // Issuer
+  "sub": "248289761001",                            // Subject (user ID)
+  "aud": "your_client_id",                          // Audience
+  "exp": 1735992000,                                // Expiration time
+  "iat": 1735988400,                                // Issued at
+  "email": "john.doe@example.com",                  // User's email
+  "email_verified": true,
+  "name": "John Doe",
+  "picture": "https://cdn.example.com/john.jpg",
+  "roles": ["user", "premium_subscriber"],          // Custom claim
+  "org_id": "org_12345"                             // Custom claim
+}</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Pro Tip:</strong>
+                    Add custom claims for things you check on every request (roles, org_id, subscription tier). This way you don't have to hit your database for basic authorization checks. Just validate the JWT signature and read the claims. We reduced our auth DB queries by 80% doing this.
+                </div>
+
+                <p>
+                    <strong>Important:</strong> Don't put sensitive data in JWTs. They're base64-encoded, not encrypted. Anyone can decode them. We had a developer accidentally include a user's SSN in a custom claim—caught it in code review, thank goodness.
+                </p>
+            </div>
+
+            <button class="collapsible">Token Storage - Where Do I Keep These Things?</button>
+            <div class="collapsible-content">
+                <h3>The Eternal Debate</h3>
+
+                <p>This is where things get spicy. Everyone has opinions. Here's what's worked for me:</p>
+
+                <h4>Option 1: HttpOnly Cookies (My Recommendation for Web Apps)</h4>
+                <pre><code>// Backend sets the cookie after OAuth callback
+Set-Cookie: access_token=...; HttpOnly; Secure; SameSite=Strict; Max-Age=3600
+
+Pros:
+✓ Not accessible to JavaScript (XSS-resistant)
+✓ Automatically sent with requests
+✓ Browser handles storage
+
+Cons:
+✗ CSRF vulnerable (use CSRF tokens)
+✗ Doesn't work for cross-origin API calls easily</code></pre>
+
+                <p>
+                    We use this for our main web app. It's been solid. The key is using <code>HttpOnly</code> so that even if someone injects malicious JavaScript, they can't steal the token.
+                </p>
+
+                <h4>Option 2: Memory (JavaScript Variable)</h4>
+                <pre><code>// Store token in memory only
+let accessToken = null;
+
+// After login
+accessToken = response.access_token;
+
+Pros:
+✓ XSS-resistant (clears on refresh)
+✓ No cookies, no localStorage
+
+Cons:
+✗ Lost on page refresh
+✗ Need refresh token flow on every reload</code></pre>
+
+                <p>
+                    Used this for our admin dashboard. It's ultra-secure but annoying for users because they have to re-auth more frequently. Good for high-security scenarios.
+                </p>
+
+                <h4>Option 3: localStorage (Please Don't)</h4>
+                <div class="info-box warning">
+                    <strong>Warning:</strong>
+                    I still see tutorials recommending this. Don't do it. Any third-party script on your page can read localStorage. We had a client using localStorage—one compromised analytics script later, and 500 accounts were accessed. Use HttpOnly cookies instead.
+                </div>
+
+                <h3>What About Mobile Apps?</h3>
+                <p>
+                    For mobile apps, use the platform's secure storage:
+                </p>
+                <ul>
+                    <li><strong>iOS:</strong> Keychain</li>
+                    <li><strong>Android:</strong> EncryptedSharedPreferences or Keystore</li>
+                </ul>
+
+                <p>
+                    Don't roll your own encryption. We tried this on Android and got it wrong. Just use the platform APIs—they're battle-tested.
+                </p>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Common Challenges (And How I've Dealt With Them)</h2>
+
+            <button class="collapsible">Challenge 1: Token Refresh Hell</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    Your access token expires after 15 minutes. You have 10 concurrent API calls in flight. Each one tries to refresh the token. Now you have 10 refresh requests hitting your auth provider, and some fail with "token already used" errors.
+                </p>
+
+                <h3>The Solution: Token Refresh Coordination</h3>
+                <pre><code>// Naive approach (DON'T DO THIS)
+async function apiCall(url) {
+  let token = getAccessToken();
+  if (isExpired(token)) {
+    token = await refreshAccessToken(); // Multiple calls = race condition
+  }
+  return fetch(url, { headers: { Authorization: `Bearer ${token}` }});
+}
+
+// Better approach (DO THIS)
+let refreshPromise = null;
+
+async function getValidAccessToken() {
+  let token = getAccessToken();
+
+  if (!isExpired(token)) {
+    return token;
+  }
+
+  // If a refresh is already in progress, wait for it
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  // Start a new refresh
+  refreshPromise = refreshAccessToken()
+    .then(newToken => {
+      refreshPromise = null;
+      return newToken;
+    })
+    .catch(err => {
+      refreshPromise = null;
+      throw err;
+    });
+
+  return refreshPromise;
+}
+
+async function apiCall(url) {
+  const token = await getValidAccessToken();
+  return fetch(url, { headers: { Authorization: `Bearer ${token}` }});
+}</code></pre>
+
+                <p>
+                    This took us three production incidents to get right. The key is coordinating all refresh attempts through a single promise.
+                </p>
+
+                <div class="info-box tip">
+                    <strong>Pro Tip:</strong>
+                    Refresh tokens proactively. Don't wait until the access token is expired. If it expires in 5 minutes and the user is active, refresh it now. Saves you from mid-request failures.
+                </div>
+            </div>
+
+            <button class="collapsible">Challenge 2: The "User Logs Out But Token Still Works" Problem</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    User clicks "Log Out" on your website. You delete their session on your backend. But... their access token is still valid for another 30 minutes. If it gets stolen, it can still be used.
+                </p>
+
+                <h3>The Solutions (Pick Your Poison)</h3>
+
+                <h4>Solution 1: Short-Lived Tokens (Easiest)</h4>
+                <p>
+                    Make access tokens expire fast (5-15 minutes). When user logs out, delete their refresh token. The access token will expire soon anyway.
+                </p>
+                <pre><code>// On logout
+async function logout() {
+  await revokeRefreshToken(refreshToken);  // Revoke at auth provider
+  deleteLocalTokens();                      // Clear cookies/memory
+  redirectToLogin();
+}
+
+// Access token still works for ~5 mins, but can't get a new one</code></pre>
+                <p><strong>Trade-off:</strong> Simple but not perfect. There's a small window of vulnerability.</p>
+
+                <h4>Solution 2: Token Blacklist (More Secure, More Complex)</h4>
+                <p>
+                    Maintain a blacklist of revoked tokens in Redis or similar fast storage.
+                </p>
+                <pre><code>// On logout
+await redis.setex(`blacklist:${accessToken}`, 3600, "revoked");
+
+// On every API request (middleware)
+const isBlacklisted = await redis.exists(`blacklist:${accessToken}`);
+if (isBlacklisted) {
+  return res.status(401).json({ error: "Token revoked" });
+}</code></pre>
+                <p><strong>Trade-off:</strong> Every request now needs a Redis check. We do this for admin tokens but not regular users (too much overhead).</p>
+
+                <h4>Solution 3: Opaque Tokens + Introspection (Most Secure, Slowest)</h4>
+                <p>
+                    Don't use JWTs as access tokens. Use opaque tokens and validate them with your auth provider on every request.
+                </p>
+                <pre><code>// On every API request
+const isValid = await authProvider.introspect(accessToken);
+if (!isValid) {
+  return res.status(401).json({ error: "Invalid token" });
+}</code></pre>
+                <p><strong>Trade-off:</strong> Ultra-secure but kills performance. Only use this for super-sensitive operations.</p>
+
+                <div class="info-box important">
+                    <strong>What We Actually Do:</strong>
+                    Combination approach. Regular users get short-lived JWTs (15 min). Admin users get opaque tokens with introspection. High-value operations (password change, fund transfer) require re-authentication regardless of token validity.
+                </div>
+            </div>
+
+            <button class="collapsible">Challenge 3: Multi-Tenancy and Organization Switching</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    You're building a B2B SaaS. Users belong to multiple organizations. Sarah works for both Acme Corp and Globex Industries. How do you handle this in OAuth?
+                </p>
+
+                <h3>The Solution: Organization Context in Tokens</h3>
+                <pre><code>// Include org_id in custom claims
+{
+  "sub": "user_12345",
+  "email": "sarah@example.com",
+  "org_id": "org_acme",              // Current organization
+  "orgs": ["org_acme", "org_globex"], // All organizations
+  "roles": {
+    "org_acme": ["admin"],
+    "org_globex": ["viewer"]
+  }
+}
+
+// When user switches organizations
+async function switchOrganization(newOrgId) {
+  // Request new tokens with different org context
+  const newTokens = await authProvider.getTokens({
+    grant_type: 'refresh_token',
+    refresh_token: currentRefreshToken,
+    org_id: newOrgId  // Custom parameter
+  });
+
+  // Update tokens
+  setAccessToken(newTokens.access_token);
+  setIdToken(newTokens.id_token);
+}</code></pre>
+
+                <p>
+                    <strong>Key insight:</strong> Don't try to cram all permissions for all orgs into one token. It gets huge and unwieldy. Instead, each token represents one organization context. When the user switches orgs, get a new token.
+                </p>
+
+                <div class="info-box tip">
+                    <strong>From the Trenches:</strong>
+                    We initially tried to put all org permissions in one token. For users in 10+ organizations, the JWT was over 8KB and exceeded header size limits in some browsers. Switching to org-specific tokens solved it.
+                </div>
+            </div>
+
+            <button class="collapsible">Challenge 4: Mobile Deep Links and OAuth Callbacks</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    User clicks "Login with Google" in your mobile app. They're redirected to Google's login page in a browser. After login, how do you get back to your app?
+                </p>
+
+                <h3>The Solution: Custom URL Schemes + Universal Links</h3>
+
+                <h4>iOS Universal Links</h4>
+                <pre><code>// 1. Configure in your app
+// Associated Domains: applinks:yourapp.com
+
+// 2. Host apple-app-site-association file
+{
+  "applinks": {
+    "apps": [],
+    "details": [{
+      "appID": "TEAM_ID.com.yourapp",
+      "paths": ["/oauth/callback"]
+    }]
+  }
+}
+
+// 3. Register redirect URI with auth provider
+redirect_uri: https://yourapp.com/oauth/callback
+
+// 4. Handle in your app
+func application(_ app: UIApplication,
+                continue userActivity: NSUserActivity,
+                restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+    if let url = userActivity.webpageURL,
+       url.path == "/oauth/callback" {
+        handleOAuthCallback(url)
+    }
+}</code></pre>
+
+                <h4>Android App Links</h4>
+                <pre><code>// 1. Configure in AndroidManifest.xml
+<intent-filter android:autoVerify="true">
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="https"
+          android:host="yourapp.com"
+          android:pathPrefix="/oauth/callback" />
+</intent-filter>
+
+// 2. Host assetlinks.json file
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.yourapp",
+    "sha256_cert_fingerprints": ["SHA256_FINGERPRINT"]
+  }
+}]</code></pre>
+
+                <p>
+                    <strong>Gotcha we hit:</strong> Universal Links don't work if you tap a link while in the same domain (e.g., in an in-app browser showing yourapp.com). iOS thinks you want to stay in the browser. We had to use a different domain for the OAuth callback to force the app to open.
+                </p>
+
+                <div class="info-box warning">
+                    <strong>Security Note:</strong>
+                    Always use Universal Links / App Links, not custom URL schemes. Custom schemes like <code>yourapp://callback</code> can be hijacked by malicious apps. We learned this during a security audit.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Mitigations and Security Best Practices</h2>
+
+            <h3>The Non-Negotiables</h3>
+
+            <div class="info-box important">
+                <strong>Principal Engineer Take:</strong>
+                Every OAuth implementation I've reviewed has had at least one of these vulnerabilities. Use this as your checklist before going to production.
+            </div>
+
+            <h4>1. Always Validate the State Parameter</h4>
+            <pre><code>// Generate random state before redirecting to auth provider
+const state = generateRandomString(32);
+sessionStorage.setItem('oauth_state', state);
+
+window.location = `https://auth.provider.com/authorize?
+  client_id=...&
+  redirect_uri=...&
+  state=${state}`;
+
+// On callback, validate it
+const callbackState = new URLSearchParams(window.location.search).get('state');
+const expectedState = sessionStorage.getItem('oauth_state');
+
+if (callbackState !== expectedState) {
+  throw new Error('CSRF attack detected!');
+}</code></pre>
+            <p><strong>Why:</strong> Prevents CSRF attacks where an attacker tricks a user into logging in as the attacker.</p>
+
+            <h4>2. Validate the ID Token Signature</h4>
+            <pre><code>// Don't just decode the JWT—validate it!
+const jwksClient = require('jwks-rsa');
+const jwt = require('jsonwebtoken');
+
+const client = jwksClient({
+  jwksUri: 'https://auth.provider.com/.well-known/jwks.json'
+});
+
+function getKey(header, callback) {
+  client.getSigningKey(header.kid, (err, key) => {
+    const signingKey = key.publicKey || key.rsaPublicKey;
+    callback(null, signingKey);
+  });
+}
+
+jwt.verify(idToken, getKey, {
+  audience: YOUR_CLIENT_ID,
+  issuer: 'https://auth.provider.com',
+  algorithms: ['RS256']
+}, (err, decoded) => {
+  if (err) {
+    throw new Error('Invalid token!');
+  }
+  // Token is valid
+});</code></pre>
+            <p><strong>Why:</strong> Anyone can create a fake JWT. You must verify it was signed by your auth provider.</p>
+
+            <h4>3. Use PKCE for Public Clients</h4>
+            <pre><code>// 1. Generate code verifier (random string)
+const codeVerifier = generateRandomString(128);
+sessionStorage.setItem('pkce_verifier', codeVerifier);
+
+// 2. Create code challenge (SHA256 hash)
+const codeChallenge = base64UrlEncode(sha256(codeVerifier));
+
+// 3. Include in authorization request
+window.location = `https://auth.provider.com/authorize?
+  client_id=...&
+  redirect_uri=...&
+  code_challenge=${codeChallenge}&
+  code_challenge_method=S256`;
+
+// 4. Include verifier in token request
+const tokenResponse = await fetch('https://auth.provider.com/token', {
+  method: 'POST',
+  body: new URLSearchParams({
+    grant_type: 'authorization_code',
+    code: authCode,
+    redirect_uri: REDIRECT_URI,
+    client_id: CLIENT_ID,
+    code_verifier: sessionStorage.getItem('pkce_verifier')
+  })
+});</code></pre>
+            <p><strong>Why:</strong> Prevents authorization code interception attacks, especially on mobile.</p>
+
+            <h4>4. Validate Redirect URIs Strictly</h4>
+            <pre><code>// Bad: Wildcard redirect URIs
+redirect_uris: ["https://*.yourapp.com/callback"]  // DON'T DO THIS
+
+// Good: Exact matches only
+redirect_uris: [
+  "https://app.yourapp.com/oauth/callback",
+  "https://staging.yourapp.com/oauth/callback",
+  "http://localhost:3000/oauth/callback"  // Only for dev
+]
+
+// Backend validation
+const ALLOWED_REDIRECTS = new Set([
+  'https://app.yourapp.com/oauth/callback',
+  'https://staging.yourapp.com/oauth/callback'
+]);
+
+if (!ALLOWED_REDIRECTS.has(requestedRedirectUri)) {
+  throw new Error('Invalid redirect URI');
+}</code></pre>
+            <p><strong>Why:</strong> Open redirects allow attackers to steal authorization codes.</p>
+
+            <h4>5. Implement Rate Limiting</h4>
+            <pre><code>// Rate limit token endpoints
+const rateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                   // 10 requests per window
+  message: 'Too many token requests'
+});
+
+app.post('/oauth/callback', rateLimiter, async (req, res) => {
+  // Handle OAuth callback
+});</code></pre>
+            <p><strong>Why:</strong> Prevents brute force attacks on authorization codes.</p>
+
+            <h4>6. Log and Monitor</h4>
+            <pre><code>// Log important OAuth events
+logger.info('OAuth login initiated', {
+  userId: userId,
+  ip: req.ip,
+  userAgent: req.headers['user-agent'],
+  timestamp: new Date().toISOString()
+});
+
+logger.warn('Failed token validation', {
+  reason: 'Expired token',
+  userId: userId,
+  tokenAge: tokenAge
+});
+
+// Alert on suspicious patterns
+if (failedAttemptsInLastHour > 50) {
+  alertSecurityTeam('Possible brute force attack detected');
+}</code></pre>
+            <p><strong>Why:</strong> You can't fix what you can't see. We caught a credential stuffing attack because of good logging.</p>
+        </section>
+
+        <section class="content-section">
+            <h2>Real Production Architecture</h2>
+
+            <p>
+                Here's the actual OAuth/OIDC architecture we run in production for a fintech app (simplified):
+            </p>
+
+            <pre><code>                  ┌──────────────┐
+                  │   Client     │
+                  │   (React)    │
+                  └───────┬──────┘
+                          │
+                          │ 1. /login click
+                          ▼
+                  ┌──────────────┐
+                  │    Auth0     │◄──── Managed service
+                  │   (IdP)      │      - User database
+                  └───────┬──────┘      - MFA
+                          │             - Social login
+                          │ 2. Tokens   - Session management
+                          ▼
+┌─────────────────────────────────────────────────────┐
+│              API Gateway (Kong)                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │  JWT Validation Plugin                        │  │
+│  │  - Verify signature                           │  │
+│  │  - Check expiration                           │  │
+│  │  - Validate audience/issuer                   │  │
+│  │  - Extract user_id, org_id from claims        │  │
+│  └───────────────────────────────────────────────┘  │
+└──────────────┬──────────────────────────────────────┘
+               │
+               │ 3. Enriched request
+               │    Headers: X-User-Id, X-Org-Id
+               ▼
+    ┌──────────────────────────┐
+    │   Microservices          │
+    │                          │
+    │  ┌────────────┐          │
+    │  │  Orders    │          │
+    │  └────────────┘          │
+    │  ┌────────────┐          │
+    │  │  Payments  │          │
+    │  └────────────┘          │
+    │  ┌────────────┐          │
+    │  │  Users     │          │
+    │  └────────────┘          │
+    └──────────────────────────┘
+
+Key Decisions:
+1. Token validation at the edge (API Gateway)
+   - Microservices don't need to validate JWTs
+   - Single point of enforcement
+   - Performance: ~2ms overhead
+
+2. Opaque tokens for refresh tokens
+   - Stored in Redis
+   - Can be revoked instantly
+   - Encrypted at rest
+
+3. Access token caching
+   - Cache public keys from Auth0 JWKS endpoint
+   - TTL: 1 hour
+   - Reduces auth provider calls by 99%
+
+4. Fallback to introspection for admin tokens
+   - Regular users: JWT validation
+   - Admin users: Token introspection
+   - Trade-off: Security vs. performance</code></pre>
+
+            <div class="info-box note">
+                <strong>Why This Works:</strong>
+                We handle ~5,000 requests/second during peak hours. Validating JWTs at the gateway means our services don't care about auth—they trust the X-User-Id header. This simplified our microservices architecture significantly.
+            </div>
+
+            <h3>The Database Side</h3>
+            <pre><code>-- Users table (minimal, most data in Auth0)
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  auth0_user_id VARCHAR(255) UNIQUE NOT NULL,  -- Maps to 'sub' claim
+  email VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  last_login TIMESTAMP
+);
+
+-- Refresh tokens (if you store them yourself)
+CREATE TABLE refresh_tokens (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id),
+  token_hash VARCHAR(255) UNIQUE NOT NULL,  -- Store hash, not plaintext!
+  expires_at TIMESTAMP NOT NULL,
+  revoked_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW(),
+  INDEX idx_user_id (user_id),
+  INDEX idx_token_hash (token_hash)
+);
+
+-- Audit log for OAuth events
+CREATE TABLE oauth_events (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  event_type VARCHAR(50) NOT NULL,  -- login, logout, refresh, revoke
+  ip_address INET,
+  user_agent TEXT,
+  success BOOLEAN NOT NULL,
+  error_message TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Organization memberships (multi-tenancy)
+CREATE TABLE organization_members (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id),
+  organization_id UUID REFERENCES organizations(id),
+  role VARCHAR(50) NOT NULL,  -- admin, member, viewer
+  joined_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(user_id, organization_id)
+);</code></pre>
+
+            <p>
+                <strong>Design philosophy:</strong> Store as little as possible in your database. Use your IdP (Auth0, Okta) as the source of truth for user identity. We sync email and last_login for analytics, but everything else lives in Auth0.
+            </p>
+        </section>
+
+        <section class="content-section">
+            <h2>Testing OAuth Flows</h2>
+
+            <p>
+                Testing OAuth is painful because it involves redirects, external services, and state management. Here's how we do it:
+            </p>
+
+            <h3>Unit Tests (Mock Everything)</h3>
+            <pre><code>// Mock the auth provider
+jest.mock('../services/authProvider', () => ({
+  exchangeCodeForTokens: jest.fn().mockResolvedValue({
+    access_token: 'mock_access_token',
+    id_token: 'mock_id_token',
+    refresh_token: 'mock_refresh_token'
+  }),
+  verifyIdToken: jest.fn().mockResolvedValue({
+    sub: 'user_123',
+    email: 'test@example.com'
+  })
+}));
+
+test('OAuth callback handler', async () => {
+  const req = {
+    query: { code: 'auth_code_123', state: 'valid_state' },
+    session: { oauth_state: 'valid_state' }
+  };
+
+  const res = mockResponse();
+
+  await oauthCallbackHandler(req, res);
+
+  expect(res.cookie).toHaveBeenCalledWith(
+    'access_token',
+    expect.any(String),
+    expect.objectContaining({ httpOnly: true })
+  );
+  expect(res.redirect).toHaveBeenCalledWith('/dashboard');
+});</code></pre>
+
+            <h3>Integration Tests (Use Test Accounts)</h3>
+            <pre><code>// Use Auth0's test tenant or create test users
+describe('OAuth flow integration', () => {
+  let testUser;
+
+  beforeAll(async () => {
+    // Create test user via Management API
+    testUser = await auth0Management.createUser({
+      email: 'test@example.com',
+      password: 'Test123!@#',
+      connection: 'Username-Password-Authentication'
+    });
+  });
+
+  test('Full OAuth flow', async () => {
+    // 1. Initiate login
+    const authUrl = await getAuthorizationUrl();
+
+    // 2. Simulate user login (using Puppeteer)
+    const browser = await puppeteer.launch();
+    const page = await browser.newPage();
+    await page.goto(authUrl);
+    await page.type('#username', testUser.email);
+    await page.type('#password', 'Test123!@#');
+    await page.click('button[type=submit]');
+
+    // 3. Wait for redirect
+    await page.waitForNavigation();
+    const callbackUrl = page.url();
+
+    // 4. Extract code and exchange for tokens
+    const code = new URL(callbackUrl).searchParams.get('code');
+    const tokens = await exchangeCodeForTokens(code);
+
+    expect(tokens.access_token).toBeDefined();
+    expect(tokens.id_token).toBeDefined();
+
+    await browser.close();
+  });
+
+  afterAll(async () => {
+    // Clean up test user
+    await auth0Management.deleteUser(testUser.user_id);
+  });
+});</code></pre>
+
+            <h3>Manual Testing with OAuth Playground</h3>
+            <p>
+                For quick manual tests, I use Auth0's or Google's OAuth playground:
+            </p>
+            <ul>
+                <li><a href="https://auth0.com/docs/get-started/authentication-and-authorization-flow/try-login" target="_blank">Auth0 Login Playground</a></li>
+                <li><a href="https://developers.google.com/oauthplayground/" target="_blank">Google OAuth Playground</a></li>
+            </ul>
+
+            <p>
+                <strong>Pro tip:</strong> Use JWT.io to decode and inspect ID tokens during debugging. Just remember—anyone can decode JWTs, so don't put secrets in them.
+            </p>
+        </section>
+
+        <section class="content-section">
+            <h2>Lessons from Production Incidents</h2>
+
+            <h3>Incident 1: The Great Token Expiration</h3>
+            <p>
+                <strong>What happened:</strong> We changed access token expiration from 1 hour to 15 minutes. Didn't update the refresh logic. 10,000 users got logged out simultaneously during peak hours.
+            </p>
+            <p>
+                <strong>Root cause:</strong> Frontend was hardcoded to refresh at 50 minutes. When tokens started expiring at 15 minutes, the refresh logic never triggered.
+            </p>
+            <p>
+                <strong>Fix:</strong> Read the <code>exp</code> claim from the JWT dynamically. Refresh at 80% of the token lifetime.
+            </p>
+            <pre><code>function getRefreshTime(idToken) {
+  const decoded = jwtDecode(idToken);
+  const expiresAt = decoded.exp * 1000; // Convert to ms
+  const issuedAt = decoded.iat * 1000;
+  const lifetime = expiresAt - issuedAt;
+  return issuedAt + (lifetime * 0.8);  // Refresh at 80% lifetime
+}</code></pre>
+
+            <h3>Incident 2: The Redirect URI Typo</h3>
+            <p>
+                <strong>What happened:</strong> Developer deployed with <code>redirect_uri=https://app.example.com/oauth/callbac</code> (missing 'k'). OAuth flow broke for everyone.
+            </p>
+            <p>
+                <strong>Root cause:</strong> Redirect URI was hardcoded as a string constant. Typo wasn't caught in tests.
+            </p>
+            <p>
+                <strong>Fix:</strong> Validate redirect URIs in CI/CD.
+            </p>
+            <pre><code>// In test suite
+test('redirect URI is registered with auth provider', async () => {
+  const client = await authProvider.getClient(CLIENT_ID);
+  const allowedUris = client.redirect_uris;
+
+  expect(allowedUris).toContain(process.env.OAUTH_REDIRECT_URI);
+});</code></pre>
+
+            <h3>Incident 3: The Refresh Token Leak</h3>
+            <p>
+                <strong>What happened:</strong> Refresh tokens were being logged in application logs. An intern ran a log export, uploaded it to a debugging service. Tokens were compromised.
+            </p>
+            <p>
+                <strong>Root cause:</strong> Debug logging included full request/response bodies.
+            </p>
+            <p>
+                <strong>Fix:</strong> Implemented token scrubbing in logger.
+            </p>
+            <pre><code>function sanitizeLog(data) {
+  const sensitiveFields = ['access_token', 'refresh_token', 'id_token', 'password', 'client_secret'];
+
+  return JSON.parse(JSON.stringify(data, (key, value) => {
+    if (sensitiveFields.includes(key)) {
+      return '[REDACTED]';
+    }
+    return value;
+  }));
+}
+
+logger.info('OAuth response', sanitizeLog(response));</code></pre>
+        </section>
+
+        <section class="content-section">
+            <h2>Key Takeaways</h2>
+
+            <div class="info-box important">
+                <strong>If I could go back and tell myself three things before my first OAuth implementation:</strong>
+            </div>
+
+            <ol>
+                <li>
+                    <strong>Use a managed identity provider.</strong> Don't build your own unless you have a security team and a really good reason. We wasted 6 months building custom auth before switching to Auth0. Those 6 months could've been spent on features.
+                </li>
+                <li>
+                    <strong>Keep tokens short-lived and use refresh tokens properly.</strong> Access tokens should expire in minutes, not hours. Use refresh tokens to get new ones. This limits the damage if a token leaks.
+                </li>
+                <li>
+                    <strong>Security isn't negotiable.</strong> PKCE, state validation, signature verification—these aren't optional. I've seen too many teams skip these and regret it later. Do it right the first time.
+                </li>
+            </ol>
+
+            <p>
+                OAuth and OIDC are complex, but they solve hard problems. Every time I've tried to cut corners or build a "simpler" solution, it's come back to bite me. Follow the spec, use battle-tested libraries, and you'll be fine.
+            </p>
+        </section>
+
+        <section class="content-section">
+            <h2>Additional Resources</h2>
+            <ul>
+                <li><a href="https://oauth.net/2/" target="_blank">OAuth 2.0 Official Spec</a></li>
+                <li><a href="https://openid.net/connect/" target="_blank">OpenID Connect Spec</a></li>
+                <li><a href="https://tools.ietf.org/html/rfc7636" target="_blank">PKCE RFC (RFC 7636)</a></li>
+                <li><a href="https://jwt.io/" target="_blank">JWT.io - Decode and Debug JWTs</a></li>
+                <li><a href="https://auth0.com/docs/security/tokens/token-best-practices" target="_blank">Auth0 Token Best Practices</a></li>
+                <li><a href="https://developer.okta.com/blog/2019/10/21/illustrated-guide-to-oauth-and-oidc" target="_blank">Illustrated Guide to OAuth and OIDC</a></li>
+            </ul>
+        </section>
+
+        <section class="content-section">
+            <h2>Related Topics</h2>
+            <div class="topics-grid">
+                <div class="topic-card">
+                    <h3>Microservices Architecture</h3>
+                    <p>Learn how OAuth fits into microservices authentication and API gateways.</p>
+                    <a href="../microservices/index.html" class="btn">Learn More →</a>
+                </div>
+                <div class="topic-card">
+                    <h3>System Design Basics</h3>
+                    <p>Understand the fundamentals of distributed systems and security patterns.</p>
+                    <a href="../basics/index.html" class="btn">Learn More →</a>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 System Design Reference Guide | Your Personal Learning Resource</p>
+    </footer>
+
+    <script src="../js/main.js"></script>
+</body>
+</html>

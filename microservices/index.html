@@ -20,6 +20,8 @@
                 <li><a href="../basics/index.html">Basics</a></li>
                 <li><a href="../kafka/index.html">Kafka</a></li>
                 <li><a href="../microservices/index.html" class="active">Microservices</a></li>
+                <li><a href="../oauth/index.html">OAuth & OIDC</a></li>
+                <li><a href="../data-security/index.html">Data Security</a></li>
             </ul>
         </div>
     </nav>
@@ -33,521 +35,2065 @@
 
         <header class="hero">
             <h1>Microservices Architecture</h1>
-            <p class="subtitle">Building scalable, maintainable distributed systems with independent services</p>
+            <p class="subtitle">Building distributed systems that don't fall apart at 2 AM</p>
         </header>
 
         <section class="content-section">
-            <h2>What are Microservices?</h2>
+            <h2>Introduction</h2>
             <p>
-                Microservices is an architectural style that structures an application as a collection of small,
-                autonomous services modeled around a business domain. Each service is self-contained, independently
-                deployable, and communicates through well-defined APIs.
+                Let me tell you about the first time I tried to break apart a monolith. We had this e-commerce platform—one giant Rails app handling everything: product catalog, inventory, orders, payments, shipping, customer accounts. It worked fine for 3 years. Then Black Friday hit, and the payment processor slowed down, which created head-of-line blocking in our order queue, which escalated lock contention on our RDBMS (row-level locks on the orders table), which starved the connection pool for read queries, which caused cascade failures across our product catalog API, ultimately bringing down the entire system. Classic cascading failure pattern—one slow subsystem poisoned the entire process space.
             </p>
 
+            <p>
+                "We need microservices!" management declared. Six months, three teams, and countless headaches later, we had 15 services. We also had distributed sagas that occasionally violated ACID guarantees mid-flight, synchronous RPC calls with unpredictable tail latency (P99 > 5s), and distributed tracing was non-existent so debugging meant correlating logs across multiple service boundaries using request IDs we hadn't instrumented consistently. But you know what? When payment processing slowed down the next Black Friday, we had proper bulkhead isolation. The checkout path degraded gracefully while catalog reads maintained sub-200ms P95 latency. Failure domain containment actually worked.
+            </p>
+
+            <p>
+                Microservices aren't a silver bullet. They trade monolithic complexity (tight coupling, deployment coordination, vertical scaling constraints) for distributed systems complexity (partial failures, network partitions, CAP theorem trade-offs, clock skew, Byzantine fault scenarios). But when done right, they give you horizontal scalability, polyglot persistence, independent deployment cadences, and most critically—failure isolation through bulkhead patterns. Let me show you what actually works.
+            </p>
+
+            <div class="info-box important">
+                <strong>Architect Perspective:</strong>
+                I've migrated three monoliths to microservices and built two greenfield systems with distributed architecture from day one. The pattern is clear: start with a modular monolith until you hit vertical scaling limits or organizational Conway's Law friction, then extract bounded contexts strategically using domain-driven design principles. Don't go microservices because it's trendy—go microservices when you can articulate specific technical debt (deployment coupling, resource contention, blast radius) or organizational impedance (team autonomy, independent release trains) that distributed architecture actually solves.
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>High-Level Architecture</h2>
+
+            <h3>The Big Picture</h3>
+            <p>
+                Here's what a real microservices architecture looks like, based on an e-commerce platform I designed:
+            </p>
+
+            <pre><code>┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT LAYER                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │   Web    │  │  Mobile  │  │   POS    │  │  Partner │       │
+│  │   App    │  │   App    │  │  Client  │  │   API    │       │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+└───────┼─────────────┼─────────────┼─────────────┼──────────────┘
+        │             │             │             │
+        └─────────────┴─────────────┴─────────────┘
+                      │
+        ┌─────────────▼─────────────┐
+        │      API GATEWAY          │  ← Single entry point
+        │    (Kong / NGINX)         │     - Authentication
+        │                           │     - Rate limiting
+        └─────────────┬─────────────┘     - Routing
+                      │
+        ┌─────────────┴─────────────────────────────┐
+        │                                           │
+┌───────▼─────────┐                   ┌─────────────▼──────────┐
+│  SERVICE MESH   │                   │   MESSAGE BUS          │
+│  (Istio/Linkerd)│                   │   (Kafka/RabbitMQ)     │
+└───────┬─────────┘                   └─────────────┬──────────┘
+        │                                           │
+┌───────┴────────────────────────────────────────┬──┴──────┐
+│                                                │         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────▼──────┐  │
+│  │   Product    │  │  Inventory   │  │    Order     │  │
+│  │   Service    │  │   Service    │  │   Service    │  │
+│  │              │  │              │  │              │  │
+│  │  - Catalog   │  │  - Stock     │  │  - Cart      │  │
+│  │  - Search    │  │  - Reserve   │  │  - Checkout  │  │
+│  │  - Pricing   │  │  - Allocate  │  │  - Fulfill   │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
+│         │                 │                  │          │
+│  ┌──────▼───────┐  ┌──────▼───────┐  ┌──────▼───────┐  │
+│  │  Product DB  │  │ Inventory DB │  │   Order DB   │  │
+│  │ (PostgreSQL) │  │ (PostgreSQL) │  │ (PostgreSQL) │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   Payment    │  │   Customer   │  │  Notification│  │
+│  │   Service    │  │   Service    │  │   Service    │  │
+│  │              │  │              │  │              │  │
+│  │  - Process   │  │  - Profile   │  │  - Email     │  │
+│  │  - Refund    │  │  - Auth      │  │  - SMS       │  │
+│  │  - Tokenize  │  │  - Loyalty   │  │  - Push      │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+
+Key Principles:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Each service owns its database (no shared DB)
+2. Services communicate via APIs (REST/gRPC) or events (Kafka)
+3. API Gateway handles cross-cutting concerns (auth, rate limiting)
+4. Service mesh manages service-to-service communication
+5. Each service can be deployed independently</code></pre>
+
             <div class="info-box note">
-                <strong>Key Principle:</strong>
-                Each microservice should be focused on doing one thing well (Single Responsibility Principle).
+                <strong>Real Talk:</strong>
+                This looks clean on paper. In reality, you'll have 30+ services with complex DAG (directed acyclic graph) dependencies, polyglot tech stacks (JVM services, Node.js for I/O-bound workloads, Go for latency-sensitive paths), distributed tracing with OpenTelemetry/Jaeger to reconstruct request flows across service boundaries, and incident response that requires understanding transitive dependencies and call graph topology. But the alternative—one massive codebase where memory leaks in the recommendation engine OOM-kill the checkout process—is worse. Proper process isolation and cgroup resource limits beat shared memory space.
             </div>
         </section>
 
         <section class="content-section">
-            <h2>Microservices vs Monolith</h2>
+            <h2>Design Patterns That Actually Matter</h2>
 
-            <table>
-                <thead>
-                    <tr>
-                        <th>Aspect</th>
-                        <th>Monolithic</th>
-                        <th>Microservices</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>Structure</td>
-                        <td>Single codebase</td>
-                        <td>Multiple independent services</td>
-                    </tr>
-                    <tr>
-                        <td>Deployment</td>
-                        <td>Deploy entire application</td>
-                        <td>Deploy services independently</td>
-                    </tr>
-                    <tr>
-                        <td>Scaling</td>
-                        <td>Scale entire application</td>
-                        <td>Scale individual services</td>
-                    </tr>
-                    <tr>
-                        <td>Technology</td>
-                        <td>Single tech stack</td>
-                        <td>Different stack per service</td>
-                    </tr>
-                    <tr>
-                        <td>Development</td>
-                        <td>Simple to develop initially</td>
-                        <td>Complex distributed system</td>
-                    </tr>
-                    <tr>
-                        <td>Failure Impact</td>
-                        <td>Single point of failure</td>
-                        <td>Isolated failures</td>
-                    </tr>
-                    <tr>
-                        <td>Best For</td>
-                        <td>Small teams, simple apps</td>
-                        <td>Large teams, complex apps</td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <div class="info-box warning">
-                <strong>Don't Start with Microservices:</strong>
-                Consider starting with a monolith and breaking it into microservices as you understand the domain better.
-                Premature microservices can lead to unnecessary complexity.
-            </div>
-        </section>
-
-        <section class="content-section">
-            <h2>Core Concepts</h2>
-
-            <button class="collapsible">Service Communication</button>
+            <button class="collapsible">API Gateway Pattern: The Front Door</button>
             <div class="collapsible-content">
-                <h3>Synchronous Communication</h3>
-                <p><strong>REST APIs (HTTP/HTTPS)</strong></p>
-                <ul>
-                    <li>Simple and widely understood</li>
-                    <li>Easy to test and debug</li>
-                    <li>Tight coupling between services</li>
-                    <li>Services must be available simultaneously</li>
-                </ul>
-
-                <p><strong>gRPC</strong></p>
-                <ul>
-                    <li>High performance with Protocol Buffers</li>
-                    <li>Supports streaming</li>
-                    <li>Strong typing and contract</li>
-                    <li>Better for service-to-service communication</li>
-                </ul>
-
-                <h3>Asynchronous Communication</h3>
-                <p><strong>Message Queues (RabbitMQ, AWS SQS)</strong></p>
-                <ul>
-                    <li>Decouples services</li>
-                    <li>Services don't need to be online simultaneously</li>
-                    <li>Built-in retry mechanisms</li>
-                    <li>Better fault tolerance</li>
-                </ul>
-
-                <p><strong>Event Streaming (Kafka)</strong></p>
-                <ul>
-                    <li>Event-driven architecture</li>
-                    <li>Message replay capability</li>
-                    <li>High throughput</li>
-                    <li>Multiple consumers can process same events</li>
-                </ul>
-
-                <div class="info-box tip">
-                    <strong>Tip:</strong>
-                    Use synchronous communication for simple request-response patterns, asynchronous for long-running tasks and event-driven workflows.
-                </div>
-            </div>
-
-            <button class="collapsible">API Gateway</button>
-            <div class="collapsible-content">
-                <h3>What is an API Gateway?</h3>
+                <h3>Why You Need This</h3>
                 <p>
-                    A single entry point for all client requests that routes them to appropriate microservices.
-                    Acts as a reverse proxy.
+                    Without an API gateway, your frontend talks directly to 15 different services. That means 15 different endpoints, 15 authentication mechanisms, 15 rate limit implementations, and when you need to change something, you update 15 services. With an API gateway, you have one entry point that routes to the right service.
                 </p>
 
-                <h3>Responsibilities</h3>
-                <ul>
-                    <li><strong>Routing:</strong> Direct requests to correct microservice</li>
-                    <li><strong>Authentication & Authorization:</strong> Centralized security</li>
-                    <li><strong>Rate Limiting:</strong> Prevent abuse and overload</li>
-                    <li><strong>Load Balancing:</strong> Distribute traffic across instances</li>
-                    <li><strong>Request/Response Transformation:</strong> Adapt protocols</li>
-                    <li><strong>Caching:</strong> Reduce backend load</li>
-                    <li><strong>Monitoring & Logging:</strong> Centralized observability</li>
-                </ul>
+                <h4>What It Does</h4>
+                <pre><code>// Client makes ONE request
+GET /api/products/12345
 
-                <div class="info-box note">
-                    <strong>Popular API Gateways:</strong>
-                    Kong, AWS API Gateway, Azure API Management, NGINX, Traefik
-                </div>
+// API Gateway:
+1. Validates JWT token
+2. Checks rate limit (max 1000 req/min per user)
+3. Routes to Product Service
+4. Transforms response if needed
+5. Returns to client
 
-                <h3>Backend for Frontend (BFF) Pattern</h3>
-                <p>
-                    Create separate API gateways for different client types (web, mobile, IoT).
-                    Each BFF is optimized for its specific client's needs.
-                </p>
-            </div>
+// Without Gateway: Client needs to know
+- products.yourapp.com/products/12345
+- auth.yourapp.com to get token
+- Different rate limits per service
+- Different response formats</code></pre>
 
-            <button class="collapsible">Service Discovery</button>
-            <div class="collapsible-content">
-                <h3>The Problem</h3>
-                <p>
-                    In a dynamic microservices environment, service instances come and go. How do services
-                    find each other without hardcoding IP addresses?
-                </p>
+                <h4>Real Implementation (Kong)</h4>
+                <pre><code>// Kong API Gateway config
+{
+  "routes": [
+    {
+      "paths": ["/api/products"],
+      "service": {
+        "url": "http://product-service:3001"
+      },
+      "plugins": [
+        {
+          "name": "jwt",  // Validate JWT
+          "config": {
+            "secret_is_base64": false
+          }
+        },
+        {
+          "name": "rate-limiting",
+          "config": {
+            "minute": 1000,
+            "policy": "redis"
+          }
+        },
+        {
+          "name": "request-transformer",
+          "config": {
+            "add": {
+              "headers": ["X-User-Id:$(jwt.sub)"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "paths": ["/api/orders"],
+      "service": {
+        "url": "http://order-service:3002"
+      }
+    }
+  ]
+}</code></pre>
 
-                <h3>Solution: Service Registry</h3>
-                <p>
-                    A database of available service instances and their locations.
-                </p>
-
-                <h3>Discovery Patterns</h3>
+                <h4>Gateway Responsibilities</h4>
                 <table>
                     <thead>
                         <tr>
-                            <th>Pattern</th>
-                            <th>Description</th>
-                            <th>Examples</th>
+                            <th>Concern</th>
+                            <th>Gateway Handles</th>
+                            <th>Service Handles</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td>Client-Side</td>
-                            <td>Client queries registry and chooses instance</td>
-                            <td>Netflix Eureka</td>
+                            <td>Authentication</td>
+                            <td>✓ Verify JWT/API key</td>
+                            <td>Trust X-User-Id header</td>
                         </tr>
                         <tr>
-                            <td>Server-Side</td>
-                            <td>Load balancer queries registry</td>
-                            <td>AWS ELB, Kubernetes</td>
+                            <td>Rate Limiting</td>
+                            <td>✓ Enforce limits</td>
+                            <td>Nothing</td>
                         </tr>
                         <tr>
-                            <td>DNS-Based</td>
-                            <td>DNS returns multiple IPs for a service</td>
-                            <td>Consul DNS</td>
+                            <td>CORS</td>
+                            <td>✓ Handle preflight</td>
+                            <td>Nothing</td>
+                        </tr>
+                        <tr>
+                            <td>Authorization</td>
+                            <td>Basic (role check)</td>
+                            <td>✓ Business logic permissions</td>
+                        </tr>
+                        <tr>
+                            <td>Routing</td>
+                            <td>✓ Path → Service mapping</td>
+                            <td>Nothing</td>
+                        </tr>
+                        <tr>
+                            <td>Response Aggregation</td>
+                            <td>Optional (BFF pattern)</td>
+                            <td>Own data only</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>The Mistake I Made:</strong>
+                    We put ALL business logic in the gateway—schema validation, protocol translation (REST to gRPC), data enrichment queries hitting PostgreSQL directly. The gateway became a stateful, business-logic-laden reverse proxy violating the single responsibility principle. When we needed to update order validation rules, we deployed the gateway, which triggered rolling restarts across all ingress pods, temporarily degrading request latency across ALL service endpoints due to connection pool re-initialization. Keep the gateway thin: L7 routing, TLS termination, JWT validation, rate limiting (token bucket algorithm), request/response transformation. Domain logic belongs in services. The gateway should be stateless, horizontally scalable, and treat services as opaque backends.
+                </div>
+            </div>
+
+            <button class="collapsible">Saga Pattern: Distributed Transactions</button>
+            <div class="collapsible-content">
+                <h3>The Problem</h3>
+                <p>
+                    User places an order. You need to: (1) Reserve inventory, (2) Process payment, (3) Create order, (4) Update loyalty points. These are 4 different services with 4 different databases. What happens if step 3 fails after step 1 and 2 succeeded? You've charged the customer and reserved inventory but have no order. In a monolith, you'd wrap this in a database transaction. In microservices, you can't.
+                </p>
+
+                <h4>Choreography-Based Saga</h4>
+                <p>
+                    Services communicate via events. Each service listens for events and publishes its own:
+                </p>
+
+                <pre><code>// Happy Path
+Order Service:    Publishes → OrderCreated
+                             { order_id: 123, items: [...], total: 99.99 }
+                                    ↓
+Inventory Service: Listens → Reserves stock
+                   Publishes → InventoryReserved
+                             { order_id: 123, reserved: true }
+                                    ↓
+Payment Service:   Listens → Charges customer
+                   Publishes → PaymentProcessed
+                             { order_id: 123, charge_id: "ch_abc" }
+                                    ↓
+Fulfillment:       Listens → Ships order
+                   Publishes → OrderShipped
+
+// Failure Path (Payment fails)
+Order Service:    Publishes → OrderCreated
+Inventory Service: Publishes → InventoryReserved
+Payment Service:   Charge fails!
+                   Publishes → PaymentFailed
+                             { order_id: 123, reason: "Card declined" }
+                                    ↓
+Inventory Service: Listens → Releases stock
+                   Publishes → InventoryReleased
+                                    ↓
+Order Service:     Listens → Marks order as failed
+                   Publishes → OrderCancelled</code></pre>
+
+                <h4>Orchestration-Based Saga</h4>
+                <p>
+                    Central orchestrator controls the flow:
+                </p>
+
+                <pre><code>class OrderSagaOrchestrator {
+    async createOrder(orderData) {
+        const saga = {
+            orderId: generateId(),
+            state: 'STARTED',
+            steps: []
+        };
+
+        try {
+            // Step 1: Create order
+            saga.steps.push('ORDER_CREATED');
+            const order = await orderService.create(orderData);
+
+            // Step 2: Reserve inventory
+            saga.steps.push('INVENTORY_RESERVED');
+            const reservation = await inventoryService.reserve(order.items);
+
+            // Step 3: Process payment
+            saga.steps.push('PAYMENT_PROCESSED');
+            const payment = await paymentService.charge(order.total);
+
+            // Step 4: Confirm order
+            await orderService.confirm(order.id, payment.id);
+            saga.state = 'COMPLETED';
+
+            return { success: true, orderId: order.id };
+
+        } catch (error) {
+            // Rollback in reverse order
+            saga.state = 'ROLLING_BACK';
+
+            if (saga.steps.includes('PAYMENT_PROCESSED')) {
+                await paymentService.refund(payment.id);
+            }
+
+            if (saga.steps.includes('INVENTORY_RESERVED')) {
+                await inventoryService.release(reservation.id);
+            }
+
+            if (saga.steps.includes('ORDER_CREATED')) {
+                await orderService.cancel(order.id);
+            }
+
+            saga.state = 'FAILED';
+            return { success: false, error: error.message };
+        }
+    }
+}</code></pre>
+
+                <h4>Choreography vs Orchestration</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Choreography</th>
+                            <th>Orchestration</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Coordination</td>
+                            <td>Decentralized (events)</td>
+                            <td>Centralized (orchestrator)</td>
+                        </tr>
+                        <tr>
+                            <td>Coupling</td>
+                            <td>Loose (via event bus)</td>
+                            <td>Tighter (knows all services)</td>
+                        </tr>
+                        <tr>
+                            <td>Complexity</td>
+                            <td>Hard to follow flow</td>
+                            <td>Clear flow in one place</td>
+                        </tr>
+                        <tr>
+                            <td>Debugging</td>
+                            <td>Difficult (trace across services)</td>
+                            <td>Easier (one place to look)</td>
+                        </tr>
+                        <tr>
+                            <td>Failure Handling</td>
+                            <td>Each service handles own</td>
+                            <td>Orchestrator handles all</td>
+                        </tr>
+                        <tr>
+                            <td>Best For</td>
+                            <td>Simple flows, loose coupling</td>
+                            <td>Complex flows, need visibility</td>
                         </tr>
                     </tbody>
                 </table>
 
                 <div class="info-box important">
-                    <strong>Popular Tools:</strong>
-                    Consul, Eureka, etcd, ZooKeeper, Kubernetes (built-in)
+                    <strong>What We Actually Use:</strong>
+                    Hybrid approach based on consistency requirements and compensating transaction complexity. Choreography (event-driven, eventually consistent via Kafka) for simple flows with low coupling (order created → trigger email via asynchronous event handler). Orchestration (temporal workflow engine, centralized saga coordinator with state machine persistence) for critical distributed transactions requiring atomicity guarantees (checkout flow with compensating transactions). The checkout orchestrator maintains saga state in PostgreSQL (optimistic locking with version vectors), knows the exact sequence: validate cart → reserve inventory (2PC prepare phase) → charge payment (external PSP call) → create order (commit phase) → notify customer. If any step fails, compensating transactions execute in reverse order (release inventory reservation, void payment authorization). For email notification? Fire-and-forget event with at-least-once delivery semantics and idempotent consumer. Eventual consistency is acceptable for non-critical side effects.
                 </div>
             </div>
 
-            <button class="collapsible">Circuit Breaker Pattern</button>
+            <button class="collapsible">Circuit Breaker: Failing Fast</button>
+            <div class="collapsible-content">
+                <h3>The Cascading Failure Problem</h3>
+                <p>
+                    Payment service goes down. Order service keeps calling it, waiting 30 seconds for timeout, while requests pile up. Order service runs out of threads. API gateway can't reach order service. Your entire system grinds to a halt because one service failed.
+                </p>
+
+                <p>
+                    <strong>Circuit breaker solves this:</strong> After N failures, stop calling the failing service. Return immediately with an error or fallback response. Check periodically if the service recovered.
+                </p>
+
+                <h4>Implementation</h4>
+                <pre><code>const CircuitBreaker = require('opossum');
+
+// Wrap payment service calls
+const paymentBreaker = new CircuitBreaker(paymentService.charge, {
+    timeout: 3000,              // Consider failed if > 3s
+    errorThresholdPercentage: 50, // Open circuit if 50% fail
+    resetTimeout: 30000         // Try again after 30s
+});
+
+// Circuit states: CLOSED → OPEN → HALF_OPEN → CLOSED
+
+paymentBreaker.on('open', () => {
+    logger.error('Payment circuit OPEN - payment service is down!');
+    alerting.sendAlert('Payment service unavailable');
+});
+
+paymentBreaker.on('halfOpen', () => {
+    logger.info('Payment circuit HALF_OPEN - testing recovery');
+});
+
+paymentBreaker.on('close', () => {
+    logger.info('Payment circuit CLOSED - service recovered');
+});
+
+// Use the circuit breaker
+async function processOrder(order) {
+    try {
+        // Call through circuit breaker
+        const payment = await paymentBreaker.fire(order.total);
+        return { success: true, payment };
+
+    } catch (error) {
+        if (error.message === 'Breaker is open') {
+            // Service is down, don't even try
+            // Return fallback response
+            await orderService.markAsPending(order.id);
+            return {
+                success: false,
+                message: 'Payment temporarily unavailable. Order saved for later.'
+            };
+        }
+
+        // Actual payment failure
+        throw error;
+    }
+}
+
+// Production metrics
+Circuit State:  CLOSED   (service healthy)
+Success Rate:   98%
+Avg Response:   250ms
+Last Failure:   2 hours ago
+
+// When service degrades:
+Circuit State:  OPEN     (service down, not calling)
+Success Rate:   12%      (from last 100 requests before opening)
+Avg Response:   N/A      (not making calls)
+Opens in:       28s      (will test in 28s)</code></pre>
+
+                <h4>Fallback Strategies</h4>
+                <pre><code>// 1. Cache Strategy: Return stale data
+paymentBreaker.fallback(() => {
+    return cache.get('last_successful_payment_status');
+});
+
+// 2. Default Response
+inventoryBreaker.fallback(() => {
+    return { available: false, message: 'Check back later' };
+});
+
+// 3. Degraded Functionality
+recommendationBreaker.fallback(() => {
+    // Can't get personalized recommendations, show popular items
+    return popularProducts;
+});
+
+// 4. Queue for Later
+notificationBreaker.fallback((email) => {
+    // Email service down, queue for retry
+    await notificationQueue.add({ type: 'email', data: email });
+    return { queued: true };
+});</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Real Experience:</strong>
+                    During a payment provider outage (their PSP gateway returned HTTP 503 for 15 minutes), our circuit breaker transitioned to OPEN state after 10 consecutive failures (error threshold breached within sliding window of 100 requests). This prevented thread pool exhaustion—instead of blocking Tomcat's NIO worker threads on socket timeouts (default 30s connect timeout × 10,000 queued requests = resource starvation), requests failed fast with 503 Service Unavailable. We showed users "Payment temporarily unavailable, we've saved your cart" (graceful degradation pattern). Most waited and retried after half-open state testing confirmed PSP recovery. Without circuit breaker, thread starvation would've propagated to upstream services via backpressure, eventually exhausting API gateway connection pools and causing total system failure. Bulkhead isolation plus fail-fast semantics prevented cascade failure across service mesh.
+                </div>
+            </div>
+
+            <button class="collapsible">Event-Driven Architecture: Async Communication</button>
+            <div class="collapsible-content">
+                <h3>When to Use Events vs API Calls</h3>
+                <p>
+                    This is one of the biggest decisions in microservices. Get it wrong and you'll have a mess.
+                </p>
+
+                <h4>Synchronous (REST/gRPC) vs Asynchronous (Events)</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Scenario</th>
+                            <th>Use</th>
+                            <th>Why</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Get product details</td>
+                            <td>Synchronous API</td>
+                            <td>Need immediate response</td>
+                        </tr>
+                        <tr>
+                            <td>Order created</td>
+                            <td>Event</td>
+                            <td>Many services care, don't need immediate response</td>
+                        </tr>
+                        <tr>
+                            <td>Check inventory</td>
+                            <td>Synchronous API</td>
+                            <td>Need real-time stock count</td>
+                        </tr>
+                        <tr>
+                            <td>Send order confirmation email</td>
+                            <td>Event</td>
+                            <td>Can happen async, retry if fails</td>
+                        </tr>
+                        <tr>
+                            <td>Process payment</td>
+                            <td>Synchronous API</td>
+                            <td>Need to know success/failure immediately</td>
+                        </tr>
+                        <tr>
+                            <td>Update analytics</td>
+                            <td>Event</td>
+                            <td>Fire and forget, eventual consistency OK</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>Event-Driven Order Flow</h4>
+                <pre><code>// Order Service publishes event
+await kafka.publish('order.created', {
+    order_id: '12345',
+    user_id: 'user_789',
+    items: [{ sku: 'ABC', quantity: 2, price: 29.99 }],
+    total: 59.98,
+    timestamp: '2026-01-04T10:30:00Z'
+});
+
+// Multiple services listen (independent, parallel processing)
+
+// Inventory Service
+kafka.subscribe('order.created', async (event) => {
+    await inventoryService.reserve(event.items);
+    await kafka.publish('inventory.reserved', {
+        order_id: event.order_id,
+        reservation_id: 'res_456'
+    });
+});
+
+// Analytics Service
+kafka.subscribe('order.created', async (event) => {
+    await analyticsDB.insert({
+        event_type: 'purchase',
+        user_id: event.user_id,
+        revenue: event.total
+    });
+});
+
+// Notification Service
+kafka.subscribe('order.created', async (event) => {
+    const user = await userService.get(event.user_id);
+    await emailService.send({
+        to: user.email,
+        template: 'order_confirmation',
+        data: event
+    });
+});
+
+// Loyalty Service
+kafka.subscribe('order.created', async (event) => {
+    const points = Math.floor(event.total * 10); // 10 points per dollar
+    await loyaltyService.addPoints(event.user_id, points);
+});
+
+// Benefits:
+// - Services are decoupled (can add new listeners without changing Order Service)
+// - Parallel processing (all 4 services process simultaneously)
+// - Resilient (if email fails, order still succeeds)
+// - Auditable (event log shows what happened when)</code></pre>
+
+                <h4>Event Schema Design</h4>
+                <pre><code>// Good: Complete, immutable event
+{
+    "event_id": "evt_abc123",
+    "event_type": "order.created",
+    "version": "1.0",
+    "timestamp": "2026-01-04T10:30:00Z",
+    "data": {
+        "order_id": "12345",
+        "user_id": "user_789",
+        "items": [
+            {
+                "sku": "ABC",
+                "product_name": "Widget",  // Include for context
+                "quantity": 2,
+                "unit_price": 29.99,
+                "total": 59.98
+            }
+        ],
+        "subtotal": 59.98,
+        "tax": 5.40,
+        "shipping": 9.99,
+        "total": 75.37,
+        "shipping_address": { ... },
+        "payment_method": "tok_stripe_xyz"
+    }
+}
+
+// Bad: Minimal, requires service calls
+{
+    "order_id": "12345"  // Now every consumer has to call Order Service!
+}
+
+// Events should be self-contained
+// Consumers shouldn't need to call back to get more data</code></pre>
+
+                <div class="info-box warning">
+                    <strong>The Eventual Consistency Trap:</strong>
+                    We built an order dashboard materialized view by consuming order.created events from Kafka with consumer lag typically under 100ms (P99). But during Kafka broker rebalancing (ZooKeeper coordination timeouts), consumer lag spiked to 30+ seconds, violating our read-after-write consistency expectations. Users refreshed, didn't see their order in the dashboard (stale read), panicked and submitted duplicate orders. Classic CAP theorem trade-off—we chose availability (eventual consistency) but violated user expectations trained on strong consistency. Fix: For user-facing read-your-writes scenarios, use synchronous API queries hitting the write-authoritative database (linearizable reads) or implement session consistency with sticky routing to read replicas that participated in the write. For background processing (analytics aggregations, email notifications, data warehouse ETL), embrace eventual consistency with event sourcing. Don't expose eventually consistent materialized views to end users expecting ACID semantics.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Common Challenges and Solutions</h2>
+
+            <button class="collapsible">Service Discovery: How Do Services Find Each Other?</button>
             <div class="collapsible-content">
                 <h3>The Problem</h3>
                 <p>
-                    When a service fails, other services calling it shouldn't keep trying and waste resources.
-                    Cascading failures can bring down the entire system.
+                    You have 20 instances of Order Service running across 5 servers. Product Service needs to call one of them. Which instance? What if one dies? What if you scale to 30 instances?
                 </p>
 
-                <h3>Circuit Breaker States</h3>
-                <ul>
-                    <li><strong>Closed:</strong> Normal operation, requests flow through</li>
-                    <li><strong>Open:</strong> Service is failing, requests fail fast without calling the service</li>
-                    <li><strong>Half-Open:</strong> Limited requests allowed to test if service has recovered</li>
-                </ul>
+                <h4>Client-Side Discovery (Old Way)</h4>
+                <pre><code>// Product Service maintains list of Order Service instances
+const orderServiceHosts = [
+    'order-service-1:3000',
+    'order-service-2:3000',
+    'order-service-3:3000'
+];
 
-                <pre><code>// Pseudocode example
-if (circuitBreaker.isOpen()) {
-    return fallbackResponse();
+// Load balance manually
+const host = orderServiceHosts[Math.floor(Math.random() * orderServiceHosts.length)];
+const response = await fetch(`http://${host}/orders/123`);
+
+// Problems:
+// - What if order-service-2 is down?
+// - How do you add order-service-4 without redeploying Product Service?
+// - Every service needs its own load balancing logic</code></pre>
+
+                <h4>Server-Side Discovery (Kubernetes/Service Mesh)</h4>
+                <pre><code>// In Kubernetes
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+spec:
+  selector:
+    app: order
+  ports:
+    - port: 80
+      targetPort: 3000
+
+# DNS entry created automatically: order-service.default.svc.cluster.local
+
+# Product Service just calls the service name
+const response = await fetch('http://order-service/orders/123');
+
+# Kubernetes handles:
+# - Load balancing across all healthy pods
+# - Removing dead instances
+# - Adding new instances automatically
+# - Health checks</code></pre>
+
+                <h4>Service Mesh (Istio/Linkerd)</h4>
+                <pre><code># Service mesh adds sidecar proxy to each pod
+# Handles:
+# - Load balancing
+# - Circuit breaking
+# - Retries
+# - Timeouts
+# - mTLS encryption
+# - Distributed tracing
+
+# Configuration
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: order-service
+spec:
+  host: order-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+    loadBalancer:
+      simple: LEAST_REQUEST  # Smart load balancing
+    outlierDetection:
+      consecutiveErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s  # Circuit breaker behavior</code></pre>
+
+                <div class="info-box tip">
+                    <strong>What We Use:</strong>
+                    Kubernetes CoreDNS for L7 service discovery (kube-proxy handles L4 load balancing via iptables rules, though we're migrating to IPVS mode for better performance with 100+ service endpoints). Istio service mesh (Envoy sidecar proxies with control plane orchestration) for critical paths (payment, checkout) requiring advanced traffic management—client-side load balancing with least-request algorithm, automatic retries with exponential backoff, circuit breaking with outlier detection (ejecting unhealthy pods from load balancer pool), distributed tracing (B3 propagation headers), and mutual TLS (mTLS with certificate rotation via cert-manager). Overkill for most services—plain Kubernetes Service abstraction with DNS-based discovery and kube-proxy L4 load balancing suffices for internal RPC with acceptable tail latency. Service mesh adds 1-3ms P50 latency overhead from sidecar proxy hop, only worth it when you need sophisticated traffic policies.
+                </div>
+            </div>
+
+            <button class="collapsible">Data Consistency Across Services</button>
+            <div class="collapsible-content">
+                <h3>The Database Per Service Problem</h3>
+                <p>
+                    Order Service has order data. Customer Service has customer data. Product Service has product data. Now you need to show "Orders for Customer X with Product Names." You can't JOIN across databases.
+                </p>
+
+                <h4>Anti-Pattern: Shared Database</h4>
+                <pre><code>// DON'T DO THIS
+Order Service  ──┐
+                 ├──▶ Shared PostgreSQL Database
+Customer Service─┘
+
+Problems:
+- Tight coupling (schema change affects all services)
+- Can't scale databases independently
+- Single point of failure
+- Defeats the purpose of microservices</code></pre>
+
+                <h4>Solution 1: API Composition (Real-Time Aggregation)</h4>
+                <pre><code>// API Gateway or BFF (Backend for Frontend)
+async function getOrderDetails(orderId) {
+    // Call multiple services in parallel
+    const [order, customer, products] = await Promise.all([
+        orderService.getOrder(orderId),
+        customerService.getCustomer(customerId),
+        productService.getProducts(productIds)
+    ]);
+
+    // Compose response
+    return {
+        order_id: order.id,
+        status: order.status,
+        customer: {
+            name: customer.name,
+            email: customer.email
+        },
+        items: order.items.map(item => ({
+            ...item,
+            product_name: products.find(p => p.id === item.product_id).name
+        }))
+    };
 }
 
-try {
-    response = callService();
-    circuitBreaker.recordSuccess();
-    return response;
-} catch (Exception e) {
-    circuitBreaker.recordFailure();
-    return fallbackResponse();
+Pros: Always fresh data
+Cons: Multiple network calls, slower, services must be up</code></pre>
+
+                <h4>Solution 2: Data Replication (Eventual Consistency)</h4>
+                <pre><code>// Order Service maintains a read-optimized copy
+// Listens to events from other services
+
+// Customer Service publishes event
+kafka.publish('customer.updated', {
+    customer_id: '123',
+    name: 'John Doe',
+    email: 'john@example.com'
+});
+
+// Order Service listens and updates its local copy
+kafka.subscribe('customer.updated', async (event) => {
+    await orderDB.upsert('customer_cache', {
+        customer_id: event.customer_id,
+        name: event.name,
+        email: event.email
+    });
+});
+
+// Now Order Service can query its own DB (fast!)
+SELECT o.*, cc.name, cc.email
+FROM orders o
+JOIN customer_cache cc ON o.customer_id = cc.customer_id
+WHERE o.id = '12345';
+
+Pros: Fast queries, no cross-service calls
+Cons: Eventual consistency, data duplication</code></pre>
+
+                <h4>Solution 3: CQRS (Command Query Responsibility Segregation)</h4>
+                <pre><code>// Write path: Strong consistency
+Order Service ──▶ Orders DB (write)
+                      │
+                      └──▶ Publishes events
+                               │
+// Read path: Eventually consistent
+                               ▼
+                    Read Model Builder
+                               │
+                               ▼
+                    Aggregated Read DB
+                    (Elasticsearch/MongoDB)
+                               │
+                               ▼
+                    Query Service (reads only)
+
+// Users write to Order Service (authoritative)
+POST /orders → Order Service
+
+// Users read from Query Service (optimized views)
+GET /orders?customer=123 → Query Service
+
+// Read model contains pre-joined data
+{
+    "order_id": "12345",
+    "customer_name": "John Doe",  // From Customer Service
+    "product_names": ["Widget A"], // From Product Service
+    "status": "Shipped"
+}</code></pre>
+
+                <div class="info-box important">
+                    <strong>What We Actually Do:</strong>
+                    Polyglot persistence with consistency model tailored to use case. Critical transactional flows (checkout) use synchronous API composition with scatter-gather pattern (parallel fan-out to inventory, pricing, customer services with CompletableFuture::allOf) plus circuit breakers for fault tolerance—we need strong consistency and sub-500ms P99 latency for inventory checks to prevent overselling. Reporting/analytics use change data capture (CDC via Debezium streaming PostgreSQL WAL to Kafka) feeding materialized views in Elasticsearch—eventual consistency acceptable, optimized for high-throughput analytical queries with denormalized documents. User-facing order history uses CQRS with separate read models (read-optimized projection in MongoDB with pre-joined customer+product+shipment data) updated asynchronously via event sourcing—eliminates expensive JOIN operations, trades consistency for query latency (sub-50ms P95). The key is understanding your consistency requirements (linearizable, sequential, causal, eventual) and latency SLOs (P50/P95/P99), then picking appropriate patterns.
+                </div>
+            </div>
+
+            <button class="collapsible">Observability: Debugging Distributed Systems</button>
+            <div class="collapsible-content">
+                <h3>The "It Worked On My Machine" Nightmare</h3>
+                <p>
+                    User reports: "My order failed." You check Order Service logs—order created successfully. You check Payment Service logs—payment processed. You check Inventory Service logs—stock reserved. But the user never got confirmation email. Where did it fail? Which of the 15 services involved is the culprit?
+                </p>
+
+                <h4>The Three Pillars: Logs, Metrics, Traces</h4>
+
+                <h5>1. Distributed Tracing</h5>
+                <pre><code>// Every request gets a trace ID
+const traceId = req.headers['x-trace-id'] || generateTraceId();
+
+// Pass it through ALL service calls
+await fetch('http://inventory-service/reserve', {
+    headers: {
+        'X-Trace-Id': traceId,
+        'X-Span-Id': generateSpanId(),
+        'X-Parent-Span-Id': currentSpanId
+    }
+});
+
+// Visualize the entire request path
+Trace: trace_abc123
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+API Gateway         [==========] 1200ms
+  ├─ Order Service    [====] 450ms
+  │   ├─ OrderDB        [==] 120ms
+  │   └─ Inventory API  [=] 80ms (FAILED!)
+  │
+  ├─ Payment Service  [===] 350ms
+  │   └─ Stripe API     [==] 200ms
+  │
+  └─ Notification     [=] 100ms
+      └─ Email API      [=] 50ms
+
+ERROR at Inventory Service (span_xyz789):
+Status: 503 Service Unavailable
+Message: "Database connection pool exhausted"</code></pre>
+
+                <h5>2. Structured Logging</h5>
+                <pre><code>// Bad logging
+console.log('Order created');
+
+// Good logging (structured, searchable)
+logger.info('Order created', {
+    trace_id: traceId,
+    order_id: '12345',
+    user_id: 'user_789',
+    total: 99.99,
+    payment_method: 'stripe',
+    duration_ms: 450,
+    service: 'order-service',
+    version: '2.3.1'
+});
+
+// Now you can query
+# Show all logs for trace_abc123 across all services
+trace_id:trace_abc123
+
+# Find all failed orders in the last hour
+service:order-service AND level:error AND timestamp:[now-1h TO now]
+
+# Find slow payment processing
+service:payment-service AND duration_ms:>5000</code></pre>
+
+                <h5>3. Metrics and Dashboards</h5>
+                <pre><code>// RED metrics (Request, Error, Duration)
+http_requests_total{service="order-service", endpoint="/orders", method="POST"}
+http_request_duration_seconds{service="order-service", quantile="0.99"}
+http_errors_total{service="order-service", status="500"}
+
+// Business metrics
+orders_created_total
+revenue_total_dollars
+inventory_reservations_failed_total
+payment_declined_total
+
+// Infrastructure metrics
+cpu_usage_percent{service="order-service"}
+memory_usage_bytes{service="order-service"}
+db_connections_active{service="order-service"}
+
+// Dashboard shows:
+┌─────────────────────────────────────────┐
+│ Order Service Health                    │
+├─────────────────────────────────────────┤
+│ Request Rate:     1,200 req/s           │
+│ Error Rate:       0.5%  ⚠️              │
+│ P99 Latency:      450ms                 │
+│ DB Connections:   45/50                 │
+│ Memory:           2.1GB / 4GB           │
+└─────────────────────────────────────────┘</code></pre>
+
+                <div class="info-box warning">
+                    <strong>The Debugging Session That Lasted 6 Hours:</strong>
+                    User complaint: checkout failed, order created but inventory not decremented. No trace ID (we weren't instrumenting W3C Trace Context headers yet). Spent 6 hours correlating timestamps across 12 services' logs in CloudWatch, trying to reconstruct the distributed transaction flow with causal ordering. Finally found the root cause: Inventory Service threw a business exception (insufficient stock), but returned HTTP 200 with error payload in response body instead of proper 4xx status code. Order Service's HTTP client didn't validate business-level errors, only checked status < 400, treated it as success—classic silent failure in distributed system. We implemented OpenTelemetry instrumentation the next day with context propagation (trace ID, span ID, parent span ID in B3 multi-header format), shipped traces to Jaeger backend. Now the same debugging scenario takes 30 seconds—pull up Jaeger UI, query by trace ID, visualize complete request DAG with timing waterfalls and error annotations. Observability is non-negotiable in microservices.
+                </div>
+            </div>
+
+            <button class="collapsible">Thread Pool Exhaustion: The Blocking I/O Problem</button>
+            <div class="collapsible-content">
+                <h3>When Payment Terminals Kill Your API</h3>
+                <p>
+                    Here's a nightmare scenario I've lived through: You have a payment service that talks to physical payment terminals. Customer swipes card, your service calls the terminal, waits for response. Simple, right? Except the terminal takes 30-45 seconds to process (chip cards, PIN entry, network calls to payment processor). Your Tomcat server has 200 threads. During lunch rush, 200 concurrent payments happen. All 200 threads are blocked, waiting for terminals. Request 201 comes in—no threads available. Your entire API is frozen.
+                </p>
+
+                <h4>The Problem</h4>
+                <pre><code>// Payment Service (Tomcat with 200 threads)
+@RestController
+public class PaymentController {
+
+    @PostMapping("/payment/process")
+    public PaymentResponse processPayment(@RequestBody PaymentRequest request) {
+        // This blocks the thread for 30-45 seconds!
+        PaymentResponse response = paymentTerminalClient.tender(
+            request.getAmount(),
+            request.getTerminalId()
+        );
+
+        return response;  // Thread held for entire duration
+    }
+}
+
+// What happens during rush hour:
+Thread 1:   [=========Processing Payment 30s=========]
+Thread 2:   [=========Processing Payment 32s=========]
+Thread 3:   [=========Processing Payment 28s=========]
+...
+Thread 200: [=========Processing Payment 35s=========]
+
+// Request 201 arrives
+// No threads available!
+// Request queues up, times out
+// Customer sees: "Service Unavailable"
+// Meanwhile: 200 threads just sitting idle, waiting for terminals</code></pre>
+
+                <div class="info-box warning">
+                    <strong>The Production Incident:</strong>
+                    Black Friday, 11 AM. Payment processing starts timing out. I check JMX metrics: Tomcat NIO connector thread pool at 100% utilization (200/200 active threads). All threads blocked on synchronous HTTP calls to payment terminal service with 30-45 second response times (chip EMV transaction + PIN verification + network round-trip to payment processor). We had 30 physical terminals, but 200 concurrent payment requests queuing up due to bursty traffic (Poisson arrival distribution, mean arrival rate exceeding service rate—classic queueing theory violation). Thread starvation within 5 minutes as Little's Law kicked in (concurrency = throughput × latency). Had to restart service every 10 minutes via rolling pod restarts just to flush blocked threads and reset TCP connections. Lost thousands in sales, violated SLO (P95 < 2s, actual P95 was 45s+). Root cause: blocking I/O on fixed-size thread pool without backpressure mechanism. Fix required async I/O with bounded semaphore for concurrency control plus reactive backpressure signaling.
+                </div>
+
+                <h4>Solution 1: Async Processing with Callbacks</h4>
+                <p>
+                    Don't wait for the terminal. Return immediately, notify via webhook when done.
+                </p>
+
+                <pre><code>// 1. Accept payment request, return immediately
+@PostMapping("/payment/process")
+public PaymentInitiatedResponse processPayment(@RequestBody PaymentRequest request) {
+    String paymentId = generateId();
+
+    // Store payment as "PENDING"
+    paymentRepository.save(Payment.builder()
+        .id(paymentId)
+        .amount(request.getAmount())
+        .status(PaymentStatus.PENDING)
+        .terminalId(request.getTerminalId())
+        .build());
+
+    // Submit to queue for async processing
+    paymentQueue.send(PaymentJob.builder()
+        .paymentId(paymentId)
+        .terminalId(request.getTerminalId())
+        .amount(request.getAmount())
+        .build());
+
+    // Return immediately (thread freed!)
+    return PaymentInitiatedResponse.builder()
+        .paymentId(paymentId)
+        .status("PENDING")
+        .message("Payment is being processed")
+        .build();
+}
+
+// 2. Background worker processes queue
+@Component
+public class PaymentWorker {
+
+    @RabbitListener(queues = "payment-queue")
+    public void processPayment(PaymentJob job) {
+        try {
+            // Now we can block here - this is a dedicated worker thread
+            PaymentResponse response = paymentTerminalClient.tender(
+                job.getAmount(),
+                job.getTerminalId()
+            );
+
+            // Update payment status
+            paymentRepository.updateStatus(job.getPaymentId(),
+                response.isSuccess() ? PaymentStatus.APPROVED : PaymentStatus.DECLINED);
+
+            // Notify via webhook
+            webhookService.notify(job.getCallbackUrl(), response);
+
+            // Publish event
+            kafka.publish("payment.completed", PaymentEvent.builder()
+                .paymentId(job.getPaymentId())
+                .status(response.getStatus())
+                .build());
+
+        } catch (Exception e) {
+            paymentRepository.updateStatus(job.getPaymentId(), PaymentStatus.FAILED);
+            // Retry with backoff
+            paymentQueue.sendWithDelay(job, Duration.ofMinutes(1));
+        }
+    }
+}
+
+// 3. Client polls or listens for webhook
+// Option A: Polling
+@GetMapping("/payment/{id}/status")
+public PaymentStatusResponse getStatus(@PathVariable String id) {
+    Payment payment = paymentRepository.findById(id);
+    return PaymentStatusResponse.builder()
+        .paymentId(id)
+        .status(payment.getStatus())
+        .build();
+}
+
+// Option B: Webhook callback
+// Client provides callback URL when initiating payment
+// We call it when payment completes
+POST https://client-terminal.com/payment-callback
+{
+    "payment_id": "pay_123",
+    "status": "APPROVED",
+    "approval_code": "ABC123"
+}</code></pre>
+
+                <h4>Solution 2: Dedicated Thread Pool for Blocking Operations</h4>
+                <p>
+                    Separate thread pools: one for API requests (fast), one for terminal calls (slow).
+                </p>
+
+                <pre><code>@Configuration
+public class ThreadPoolConfig {
+
+    // API request thread pool (default Tomcat pool)
+    // Small, for fast operations only
+    @Bean
+    public TomcatServletWebServerFactory tomcatFactory() {
+        TomcatServletWebServerFactory factory = new TomcatServletWebServerFactory();
+        factory.addConnectorCustomizers(connector -> {
+            ProtocolHandler handler = connector.getProtocolHandler();
+            if (handler instanceof AbstractProtocol) {
+                AbstractProtocol protocol = (AbstractProtocol) handler;
+                protocol.setMaxThreads(200);    // API threads
+                protocol.setMinSpareThreads(10);
+            }
+        });
+        return factory;
+    }
+
+    // Dedicated thread pool for terminal operations
+    // Larger, can block without affecting API
+    @Bean(name = "terminalExecutor")
+    public Executor terminalExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(50);       // More threads
+        executor.setMaxPoolSize(100);       // Can grow
+        executor.setQueueCapacity(500);     // Queue requests
+        executor.setThreadNamePrefix("terminal-");
+        executor.initialize();
+        return executor;
+    }
+}
+
+// Use dedicated executor for terminal calls
+@Service
+public class PaymentService {
+
+    @Autowired
+    @Qualifier("terminalExecutor")
+    private Executor terminalExecutor;
+
+    @Async("terminalExecutor")
+    public CompletableFuture<PaymentResponse> processPaymentAsync(PaymentRequest request) {
+        // Runs on terminal thread pool, not API thread pool
+        PaymentResponse response = paymentTerminalClient.tender(
+            request.getAmount(),
+            request.getTerminalId()
+        );
+
+        return CompletableFuture.completedFuture(response);
+    }
+}
+
+@RestController
+public class PaymentController {
+
+    @PostMapping("/payment/process")
+    public CompletableFuture<PaymentResponse> processPayment(
+            @RequestBody PaymentRequest request) {
+        // API thread returns immediately
+        // Terminal operation runs on separate thread pool
+        return paymentService.processPaymentAsync(request);
+    }
+}</code></pre>
+
+                <h4>Solution 3: Reactive/Non-Blocking I/O</h4>
+                <p>
+                    Use reactive frameworks (WebFlux, Vert.x) that don't block threads.
+                </p>
+
+                <pre><code>// Spring WebFlux (reactive, non-blocking)
+@RestController
+public class PaymentController {
+
+    @PostMapping("/payment/process")
+    public Mono<PaymentResponse> processPayment(@RequestBody PaymentRequest request) {
+        // Returns Mono immediately (no thread blocking)
+        // Terminal call happens asynchronously
+        return paymentTerminalClient.tenderAsync(request)
+            .timeout(Duration.ofSeconds(60))
+            .doOnSuccess(response ->
+                logger.info("Payment processed", response))
+            .doOnError(error ->
+                logger.error("Payment failed", error));
+    }
+}
+
+// Reactive payment terminal client
+@Component
+public class ReactivePaymentTerminalClient {
+
+    private WebClient webClient;
+
+    public Mono<PaymentResponse> tenderAsync(PaymentRequest request) {
+        return webClient.post()
+            .uri("/tender")
+            .bodyValue(request)
+            .retrieve()
+            .bodyToMono(PaymentResponse.class)
+            .subscribeOn(Schedulers.boundedElastic());  // Non-blocking I/O
+    }
+}
+
+// With reactive: 1000 concurrent requests with 10 threads!
+// Threads don't block, they handle events
+// Much better resource utilization</code></pre>
+
+                <h4>Solution 4: Circuit Breaker + Timeout</h4>
+                <p>
+                    Prevent thread exhaustion by failing fast when terminals are slow.
+                </p>
+
+                <pre><code>// Set aggressive timeouts
+@Bean
+public RestTemplate paymentTerminalClient() {
+    HttpComponentsClientHttpRequestFactory factory =
+        new HttpComponentsClientHttpRequestFactory();
+
+    factory.setConnectTimeout(5000);      // 5s to connect
+    factory.setReadTimeout(45000);        // 45s max for terminal
+
+    return new RestTemplate(factory);
+}
+
+// Circuit breaker configuration
+@Bean
+public CircuitBreaker terminalCircuitBreaker() {
+    return CircuitBreaker.builder()
+        .timeout(45000)                   // 45s max
+        .errorThresholdPercentage(30)     // Open if 30% fail
+        .slidingWindowSize(20)            // Last 20 requests
+        .waitDurationInOpenState(Duration.ofMinutes(2))
+        .build();
+}
+
+// If terminals are slow/down, circuit opens
+// Requests fail fast instead of blocking threads
+@Service
+public class PaymentService {
+
+    public PaymentResponse processSafe(PaymentRequest request) {
+        try {
+            return circuitBreaker.executeSupplier(() ->
+                paymentTerminalClient.tender(request)
+            );
+        } catch (CallNotPermittedException e) {
+            // Circuit open - terminals are down/slow
+            // Fail fast, don't block threads
+            throw new ServiceUnavailableException(
+                "Payment terminals temporarily unavailable"
+            );
+        }
+    }
+}</code></pre>
+
+                <h4>Comparison of Approaches</h4>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Approach</th>
+                            <th>Pros</th>
+                            <th>Cons</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Async with Queue</td>
+                            <td>Decouples completely, scales well</td>
+                            <td>More complex, eventual consistency</td>
+                            <td>High volume, can tolerate delay</td>
+                        </tr>
+                        <tr>
+                            <td>Dedicated Thread Pool</td>
+                            <td>Isolates slow ops, relatively simple</td>
+                            <td>Still blocks threads, needs tuning</td>
+                            <td>Moderate volume, synchronous response needed</td>
+                        </tr>
+                        <tr>
+                            <td>Reactive I/O</td>
+                            <td>Max throughput, minimal threads</td>
+                            <td>Steep learning curve, paradigm shift</td>
+                            <td>High concurrency, modern stack</td>
+                        </tr>
+                        <tr>
+                            <td>Circuit Breaker</td>
+                            <td>Prevents cascading failure</td>
+                            <td>Doesn't solve root cause</td>
+                            <td>Defense-in-depth, use with others</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4>What We Actually Implemented</h4>
+                <pre><code>// Hybrid approach for payment terminals
+
+// 1. Async processing for standard checkout
+@PostMapping("/payment/process")
+public PaymentInitResponse process(@RequestBody PaymentRequest request) {
+    String paymentId = initiatePayment(request);
+    paymentQueue.send(paymentId);  // Process async
+    return new PaymentInitResponse(paymentId, "PENDING");
+}
+
+// 2. Dedicated thread pool for urgent/admin operations
+@PostMapping("/payment/process-sync")
+@Async("terminalExecutor")  // Separate pool
+public PaymentResponse processSync(@RequestBody PaymentRequest request) {
+    return terminalClient.tender(request);  // Block on separate pool
+}
+
+// 3. Circuit breaker on all terminal calls
+CircuitBreaker breaker = CircuitBreaker.of("terminal", config);
+breaker.decorateSupplier(() -> terminalClient.tender(request));
+
+// 4. Aggressive timeouts
+- Connect timeout: 5 seconds
+- Read timeout: 45 seconds (chip cards are slow)
+- Total timeout: 60 seconds max
+
+// 5. Terminal health monitoring
+// Disable slow terminals automatically
+if (terminal.getAvgResponseTime() > 60000) {
+    terminalService.disable(terminal.getId());
+    alertOps("Terminal " + terminal.getId() + " is slow, disabled");
+}
+
+// Result:
+- Thread pool exhaustion: NEVER happens now
+- 500+ concurrent payments during peak
+- 200 API threads handle fast requests
+- 100 terminal threads handle slow terminal calls
+- Circuit breaker prevents cascading failures
+- Average response: 2s (async) vs 35s (blocking before)</code></pre>
+
+                <div class="info-box important">
+                    <strong>Key Lessons:</strong>
+                    <ul>
+                        <li>Never perform blocking I/O operations on servlet container request-handling thread pools—violates reactive manifesto principles, causes thread starvation under load</li>
+                        <li>Payment terminal tendering is inherently high-latency (EMV chip card authentication, PIN verification via secure cryptographic protocols, synchronous network calls to PSP gateways with multi-hop routing)</li>
+                        <li>P99 latency of 30-45s is normal for chip transactions (contrast with magnetic stripe swipe: ~2s P99)</li>
+                        <li>Little's Law: 200 concurrent requests × 30s mean service time = 6000 thread-seconds of cumulative blocked time per batch!</li>
+                        <li>Async processing with non-blocking I/O (reactor pattern, event loop concurrency model) is non-negotiable for long-running operations—decouples request acceptance from completion</li>
+                        <li>Monitor thread pool saturation metrics (active threads / max threads), JVM GC pressure (old gen utilization, major GC frequency), TCP connection pool exhaustion—alert at 70% utilization with runbook automation</li>
+                        <li>Implement backpressure mechanisms (bounded queues with rejection policies, rate limiting with token bucket, circuit breakers) to prevent queue buildup and memory pressure</li>
+                    </ul>
+                </div>
+
+                <h4>Monitoring and Alerts</h4>
+                <pre><code>// Metrics to track
+tomcat_threads_active          // Current active threads
+tomcat_threads_max             // Max configured (200)
+payment_terminal_duration_ms   // P50, P99 response times
+payment_queue_size             // Backlog in async queue
+
+// Alerts
+Alert: Tomcat threads > 70%
+Action: Scale up workers, investigate slow terminals
+
+Alert: Terminal P99 latency > 60s
+Action: Check terminal health, network issues
+
+Alert: Payment queue size > 1000
+Action: Scale worker pods, check for stuck payments
+
+Alert: Circuit breaker open for terminals
+Action: Payment terminals down, notify ops immediately</code></pre>
+            </div>
+
+            <button class="collapsible">Deployment Strategies: Zero-Downtime Releases</button>
+            <div class="collapsible-content">
+                <h3>The Problem with "Deploy Everything at Once"</h3>
+                <p>
+                    In a monolith, you deploy the whole app. Downtime window: 2 AM to 3 AM. In microservices, you have 20 services. Deploying all 20 at once is chaos. Deploying them one by one over a week is also chaos. You need a strategy.
+                </p>
+
+                <h4>Rolling Deployment</h4>
+                <pre><code># Kubernetes rolling update
+kubectl set image deployment/order-service \
+  order-service=order-service:v2.0
+
+# Gradually replaces pods
+Old Pods:  [v1.0] [v1.0] [v1.0] [v1.0]
+           [v1.0] [v1.0] [v1.0] [v2.0]  ← New pod starts
+           [v1.0] [v1.0] [v2.0] [v2.0]  ← Old pod terminates
+           [v1.0] [v2.0] [v2.0] [v2.0]
+           [v2.0] [v2.0] [v2.0] [v2.0]  ← Complete
+
+# During rollout: Both versions serve traffic
+# Must be backward compatible!</code></pre>
+
+                <h4>Blue/Green Deployment</h4>
+                <pre><code># Two identical environments
+Blue (v1.0):  [pod] [pod] [pod] [pod]  ← Currently serving traffic
+Green (v2.0): [pod] [pod] [pod] [pod]  ← New version, no traffic
+
+# Deploy v2.0 to Green
+# Test Green environment
+# Switch traffic: Blue → Green (instant)
+# Keep Blue running for rollback
+
+# If v2.0 has issues: Switch back to Blue (instant rollback)</code></pre>
+
+                <h4>Canary Deployment</h4>
+                <pre><code># Send small % of traffic to new version
+v1.0: [pod] [pod] [pod] [pod]  ← 95% traffic
+v2.0: [pod]                    ← 5% traffic
+
+# Monitor error rates, latency
+# If metrics look good:
+v1.0: [pod] [pod] [pod]  ← 80% traffic
+v2.0: [pod] [pod]        ← 20% traffic
+
+# Gradually increase to 100%
+# Or rollback if errors spike
+
+# Istio configuration
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: order-service
+spec:
+  hosts:
+    - order-service
+  http:
+    - match:
+        - headers:
+            x-beta-user:
+              exact: "true"
+      route:
+        - destination:
+            host: order-service
+            subset: v2
+    - route:
+        - destination:
+            host: order-service
+            subset: v1
+          weight: 95
+        - destination:
+            host: order-service
+            subset: v2
+          weight: 5</code></pre>
+
+                <h4>Feature Flags</h4>
+                <pre><code>// Deploy code, enable features gradually
+const featureFlags = await featureFlagService.get(userId);
+
+if (featureFlags.newCheckoutFlow) {
+    return renderNewCheckout();
+} else {
+    return renderOldCheckout();
+}
+
+// Enable for 1% of users
+// Monitor metrics
+// Gradually roll out to 100%
+// Or instant rollback (just toggle flag, no deploy)</code></pre>
+
+                <div class="info-box tip">
+                    <strong>Our Strategy:</strong>
+                    Combination. Kubernetes rolling updates for low-risk changes (UI tweaks, minor bug fixes). Canary deployments for high-risk changes (new payment provider, checkout refactor). Feature flags for gradual rollouts (new recommendation algorithm). Blue/Green for database migrations (can't roll back DB schema easily). Pick the right tool for each deployment.
+                </div>
+            </div>
+        </section>
+
+        <section class="content-section">
+            <h2>Real-World Patterns from Retail</h2>
+
+            <button class="collapsible">Inventory Management Across Channels</button>
+            <div class="collapsible-content">
+                <h3>The Challenge</h3>
+                <p>
+                    You have online store, in-store terminals, and mobile app. All selling from the same inventory. Customer adds item to cart online. Meanwhile, someone buys the last unit in-store. When online customer checks out, item is out of stock. How do you prevent overselling without locking inventory for every cart add?
+                </p>
+
+                <h4>Solution: Soft vs Hard Reservations</h4>
+                <pre><code>// Soft Reservation (Cart Add)
+// Don't actually decrement stock, just track demand
+await inventoryService.softReserve({
+    sku: 'ABC123',
+    quantity: 1,
+    cart_id: 'cart_xyz',
+    ttl: 15 * 60  // 15 minute expiration
+});
+
+// Inventory Service maintains:
+inventory: {
+    'ABC123': {
+        physical_stock: 10,
+        hard_reserved: 2,     // Checked out, payment processing
+        soft_reserved: 5,     // In carts
+        available: 3          // physical - hard - soft
+    }
+}
+
+// Show availability considering soft reserves
+GET /inventory/ABC123/availability
+{
+    "available": 3,
+    "in_stock": true,
+    "stock_level": "low"  // < 5 units available
+}
+
+// Hard Reservation (Checkout Started)
+// Actually decrement stock
+await inventoryService.hardReserve({
+    sku: 'ABC123',
+    quantity: 1,
+    order_id: 'order_123',
+    ttl: 10 * 60  // 10 minute payment window
+});
+
+// If payment fails: Release reservation
+// If payment succeeds: Convert to sale
+await inventoryService.confirmSale('order_123');
+
+// If timeout: Auto-release reservation
+setInterval(async () => {
+    const expired = await inventoryService.findExpiredReservations();
+    for (const reservation of expired) {
+        await inventoryService.release(reservation.id);
+    }
+}, 60 * 1000);  // Check every minute</code></pre>
+
+                <h4>Multi-Location Inventory</h4>
+                <pre><code>// Customer location: New York
+// Item available at:
+// - Warehouse (500 units, 2-day shipping)
+// - NYC Store (5 units, same-day pickup)
+// - NJ Store (12 units, next-day pickup)
+
+GET /inventory/ABC123/fulfillment-options?location=nyc
+{
+    "options": [
+        {
+            "method": "pickup",
+            "location": "NYC Store - 5th Avenue",
+            "available": 5,
+            "ready_by": "2026-01-04T14:00:00Z",  // 2 hours
+            "distance_miles": 2.3
+        },
+        {
+            "method": "pickup",
+            "location": "NJ Store - Paramus",
+            "available": 12,
+            "ready_by": "2026-01-05T10:00:00Z",  // Next day
+            "distance_miles": 15.7
+        },
+        {
+            "method": "shipping",
+            "location": "Warehouse",
+            "available": 500,
+            "delivery_by": "2026-01-06",
+            "cost": 9.99
+        }
+    ]
+}
+
+// User selects pickup
+// Reserve at specific location
+await inventoryService.hardReserve({
+    sku: 'ABC123',
+    quantity: 1,
+    location: 'nyc-5th-ave',
+    fulfillment_method: 'pickup',
+    order_id: 'order_123'
+});
+
+// In-store system shows "Reserved for Online Order"
+// When customer arrives, staff locates item by order ID</code></pre>
+
+                <div class="info-box important">
+                    <strong>Real Experience:</strong>
+                    We launched BOPIS (buy online, pickup in store) without proper inventory synchronization strategy between online aggregated view and store-level physical stock. Online catalog showed 50 units available (stale data from batch ETL job running nightly), actual store inventory was 2 units after morning transactions. Customers drove 30 minutes based on online availability guarantee, item wasn't there—SLA violation, customer compensation required. Root cause: eventual consistency window too large (24 hours), no CDC pipeline for real-time sync. Fixed with Kafka-based event streaming from in-store POS terminals publishing inventory.updated events (Avro schema with stock deltas), consumed by online inventory service updating Redis cache (sub-minute staleness). We also implemented fuzzy availability UX ("2-5 available" instead of exact count) to account for replication lag and in-flight transactions (optimistic concurrency control with version vectors), plus reservation workflow with TTL-based soft locks to prevent race conditions during checkout-to-pickup window.
+                </div>
+            </div>
+
+            <button class="collapsible">Pricing and Promotions</button>
+            <div class="collapsible-content">
+                <h3>Dynamic Pricing Complexity</h3>
+                <p>
+                    Base price + customer segment discount + seasonal promotion + loyalty points + coupon code + bulk discount. Six different services care about price. How do you keep them in sync?
+                </p>
+
+                <h4>Pricing Service as Source of Truth</h4>
+                <pre><code>// Pricing Service calculates final price
+POST /pricing/calculate
+{
+    "sku": "ABC123",
+    "quantity": 2,
+    "customer_id": "user_789",
+    "coupon_code": "SAVE20",
+    "location": "NYC"
+}
+
+Response:
+{
+    "item_price": 29.99,
+    "quantity": 2,
+    "subtotal": 59.98,
+    "discounts": [
+        {
+            "type": "loyalty_tier",
+            "amount": -5.99,      // Gold member 10% off
+            "description": "Gold Member Discount"
+        },
+        {
+            "type": "coupon",
+            "amount": -12.00,     // SAVE20 coupon
+            "description": "SAVE20 Promo Code"
+        },
+        {
+            "type": "seasonal",
+            "amount": -2.00,      // Winter sale
+            "description": "Winter Sale"
+        }
+    ],
+    "total_discount": -19.99,
+    "final_price": 39.99,
+    "tax_estimate": 3.60,
+    "grand_total": 43.59
+}
+
+// Other services NEVER calculate price themselves
+// Always call Pricing Service
+
+// Order Service
+const pricing = await pricingService.calculate(cartItems);
+const order = await orderService.create({
+    items: cartItems,
+    pricing_snapshot: pricing,  // Store what was shown to user
+    final_total: pricing.grand_total
+});
+
+// If prices change during checkout
+const currentPricing = await pricingService.calculate(cartItems);
+if (currentPricing.grand_total !== pricing.grand_total) {
+    return {
+        error: 'PRICE_CHANGED',
+        old_total: pricing.grand_total,
+        new_total: currentPricing.grand_total,
+        message: 'Prices have changed. Please review your order.'
+    };
+}</code></pre>
+
+                <h4>Flash Sales and Surge Pricing</h4>
+                <pre><code>// Flash sale: 50% off for 1 hour
+// Expected traffic: 100x normal
+
+// Problem: Pricing Service gets hammered
+// Solution: Cache + Event-Driven Updates
+
+// Redis cache with short TTL
+const cacheKey = `price:${sku}:${customerId}`;
+let price = await redis.get(cacheKey);
+
+if (!price) {
+    price = await pricingService.calculate(sku, customerId);
+    await redis.setex(cacheKey, 60, JSON.stringify(price));  // 1 min cache
+}
+
+// When promotion starts/ends, invalidate cache
+kafka.subscribe('promotion.activated', async (event) => {
+    const affectedSkus = event.applicable_skus;
+
+    for (const sku of affectedSkus) {
+        await redis.del(`price:${sku}:*`);  // Clear all customer-specific prices
+    }
+
+    logger.info('Price cache cleared', { promotion_id: event.id });
+});
+
+// Fallback if Pricing Service is down
+pricingBreaker.fallback((sku) => {
+    // Return last known price from cache
+    return cache.getLastKnownPrice(sku);
+});</code></pre>
+            </div>
+
+            <button class="collapsible">Order Fulfillment and Status Tracking</button>
+            <div class="collapsible-content">
+                <h3>Order State Machine</h3>
+                <p>
+                    Orders flow through many states across many services. User needs real-time status. How do you track where an order is?
+                </p>
+
+                <pre><code>// Order states (simplified)
+const ORDER_STATES = {
+    CART: 'cart',                    // User building cart
+    CHECKOUT: 'checkout_started',    // Payment in progress
+    PAYMENT_FAILED: 'payment_failed',
+    PENDING: 'pending_fulfillment',  // Payment successful
+    PICKING: 'picking',              // Warehouse picking items
+    PACKED: 'packed',                // Ready to ship
+    SHIPPED: 'shipped',              // In transit
+    DELIVERED: 'delivered',
+    CANCELLED: 'cancelled',
+    REFUNDED: 'refunded'
+};
+
+// State transitions
+┌──────┐      ┌──────────┐      ┌─────────────┐
+│ CART │─────▶│ CHECKOUT │─────▶│   PENDING   │
+└──────┘      └────┬─────┘      └──────┬──────┘
+                   │                   │
+                   │                   ▼
+                   │            ┌─────────────┐
+                   │            │   PICKING   │
+                   │            └──────┬──────┘
+                   │                   │
+                   │                   ▼
+                   │            ┌─────────────┐
+                   │            │   PACKED    │
+                   │            └──────┬──────┘
+                   │                   │
+                   ▼                   ▼
+            ┌─────────────┐    ┌─────────────┐
+            │   PAYMENT   │    │   SHIPPED   │
+            │   FAILED    │    └──────┬──────┘
+            └─────────────┘           │
+                                      ▼
+                              ┌─────────────┐
+                              │  DELIVERED  │
+                              └─────────────┘
+
+// Event-driven state updates
+kafka.subscribe('payment.processed', async (event) => {
+    await orderService.updateState(event.order_id, 'pending_fulfillment');
+    await orderService.addTimeline(event.order_id, {
+        state: 'pending_fulfillment',
+        timestamp: new Date(),
+        message: 'Payment confirmed'
+    });
+});
+
+kafka.subscribe('fulfillment.picked', async (event) => {
+    await orderService.updateState(event.order_id, 'picking');
+});
+
+kafka.subscribe('shipping.shipped', async (event) => {
+    await orderService.updateState(event.order_id, 'shipped');
+    await orderService.setTrackingInfo(event.order_id, {
+        carrier: event.carrier,
+        tracking_number: event.tracking_number,
+        estimated_delivery: event.estimated_delivery
+    });
+});
+
+// Customer-facing status API
+GET /orders/12345/status
+{
+    "order_id": "12345",
+    "current_state": "shipped",
+    "timeline": [
+        {
+            "state": "pending_fulfillment",
+            "timestamp": "2026-01-04T10:30:00Z",
+            "message": "Payment confirmed"
+        },
+        {
+            "state": "picking",
+            "timestamp": "2026-01-04T11:15:00Z",
+            "message": "Your order is being prepared"
+        },
+        {
+            "state": "packed",
+            "timestamp": "2026-01-04T12:00:00Z",
+            "message": "Your order has been packed"
+        },
+        {
+            "state": "shipped",
+            "timestamp": "2026-01-04T14:30:00Z",
+            "message": "Your order has been shipped",
+            "tracking": {
+                "carrier": "FedEx",
+                "tracking_number": "1234567890",
+                "tracking_url": "https://fedex.com/track/1234567890"
+            }
+        }
+    ],
+    "estimated_delivery": "2026-01-06"
 }</code></pre>
 
                 <div class="info-box tip">
-                    <strong>Implementation:</strong>
-                    Use libraries like Netflix Hystrix (deprecated), Resilience4j, or Polly (.NET)
+                    <strong>User Experience Lesson:</strong>
+                    We showed technical states to users ("pending_fulfillment"). Customers had no idea what it meant. Now we translate: "Payment confirmed" → "We're preparing your order", "Picking" → "Being packed", "Shipped" → "On its way!". Same data, friendlier language.
                 </div>
             </div>
+        </section>
 
-            <button class="collapsible">Data Management</button>
+        <section class="content-section">
+            <h2>When Microservices Go Wrong</h2>
+
+            <button class="collapsible">The Distributed Monolith</button>
             <div class="collapsible-content">
-                <h3>Database per Service Pattern</h3>
+                <h3>How We Accidentally Built One</h3>
                 <p>
-                    Each microservice has its own database. Services cannot directly access other services' databases.
+                    We split our monolith into 20 services. Then we realized:
                 </p>
 
-                <h3>Benefits</h3>
                 <ul>
-                    <li>Loose coupling - services are independent</li>
-                    <li>Choose optimal database for each service</li>
-                    <li>Easier to scale services independently</li>
+                    <li>Every deploy required deploying all 20 services (tight coupling)</li>
+                    <li>Order Service called Product Service which called Inventory Service which called Pricing Service (cascading failures)</li>
+                    <li>Shared database for "just a few reference tables" (data coupling)</li>
+                    <li>One giant API gateway with all business logic (gateway became the new monolith)</li>
                 </ul>
 
-                <h3>Challenges</h3>
-                <ul>
-                    <li><strong>Data Consistency:</strong> No ACID transactions across services</li>
-                    <li><strong>Joins:</strong> Cannot join data across databases</li>
-                    <li><strong>Data Duplication:</strong> Some data may be replicated</li>
-                </ul>
+                <p>
+                    <strong>The symptoms:</strong>
+                </p>
 
-                <h3>Solutions</h3>
+                <pre><code>// Red flags we ignored
+1. "We can't deploy Order Service without also deploying Payment Service"
+   → They're coupled, not independent
 
-                <p><strong>1. Saga Pattern (for distributed transactions)</strong></p>
-                <ul>
-                    <li><strong>Choreography:</strong> Each service publishes events, others listen and react</li>
-                    <li><strong>Orchestration:</strong> Central orchestrator tells services what to do</li>
-                </ul>
+2. "If Product Service is down, nothing works"
+   → Single point of failure, no resilience
 
-                <p><strong>2. CQRS (Command Query Responsibility Segregation)</strong></p>
-                <ul>
-                    <li>Separate models for reading and writing data</li>
-                    <li>Write model handles commands, read model handles queries</li>
-                    <li>Often combined with Event Sourcing</li>
-                </ul>
+3. "Let's just add this validation to the gateway"
+   → Gateway is becoming fat
 
-                <p><strong>3. Event Sourcing</strong></p>
+4. "Just query the Customer table directly, it's faster"
+   → Breaking service boundaries
+
+5. "We have 20 services but only one team"
+   → Missing the organizational benefits</code></pre>
+
+                <p>
+                    <strong>How we fixed it:</strong>
+                </p>
+
                 <ul>
-                    <li>Store all changes as events, not just current state</li>
-                    <li>Rebuild state by replaying events</li>
-                    <li>Perfect audit trail</li>
+                    <li>Reduced synchronous calls, added events (choreography pattern)</li>
+                    <li>Each service got its own database (data replication via events)</li>
+                    <li>Circuit breakers everywhere (graceful degradation)</li>
+                    <li>Gateway only handles routing and auth (logic moved to services)</li>
+                    <li>Services grouped by domain teams (Orders team, Product team, etc.)</li>
                 </ul>
+            </div>
+
+            <button class="collapsible">The Dependency Hell</button>
+            <div class="collapsible-content">
+                <h3>The Startup Sequence Problem</h3>
+                <p>
+                    <strong>8 AM Monday:</strong> Entire system down after weekend maintenance. Trying to start services:
+                </p>
+
+                <pre><code>Order Service:     Error - Can't connect to Product Service
+Product Service:   Error - Can't connect to Pricing Service
+Pricing Service:   Error - Can't connect to Customer Service
+Customer Service:  Error - Database not ready
+Database:          Starting... (2 minutes)
+
+// 2 minutes later
+Database:          Ready!
+Customer Service:  Starting... connects to DB... Ready!
+Pricing Service:   Starting... Product Service still down... Error!
+Product Service:   Starting... Pricing Service down... Error!
+Order Service:     Starting... Product Service down... Error!
+
+// Chicken and egg problem</code></pre>
+
+                <p>
+                    <strong>The solution: Graceful startup and retry</strong>
+                </p>
+
+                <pre><code>// Service startup with retries
+class ServiceInitializer {
+    async initialize() {
+        // Start web server first (health checks need this)
+        await this.startWebServer();
+
+        // Initialize dependencies with retry
+        await this.initializeWithRetry('database', async () => {
+            await db.connect();
+        });
+
+        await this.initializeWithRetry('cache', async () => {
+            await redis.connect();
+        });
+
+        // External services are optional at startup
+        try {
+            await pricingServiceClient.healthCheck();
+        } catch (error) {
+            logger.warn('Pricing Service unavailable at startup, will retry later');
+            // Service still starts, requests will fail gracefully
+        }
+
+        logger.info('Service initialized and ready');
+    }
+
+    async initializeWithRetry(name, fn, maxRetries = 10) {
+        for (let i = 0; i < maxRetries; i++) {
+            try {
+                await fn();
+                logger.info(`${name} initialized`);
+                return;
+            } catch (error) {
+                logger.warn(`${name} initialization failed, retrying...`, {
+                    attempt: i + 1,
+                    maxRetries,
+                    error: error.message
+                });
+                await sleep(5000 * (i + 1));  // Exponential backoff
+            }
+        }
+
+        throw new Error(`Failed to initialize ${name} after ${maxRetries} attempts`);
+    }
+}
+
+// Health checks distinguish "starting" from "ready"
+app.get('/health/liveness', (req, res) => {
+    // Kubernetes uses this to restart crashed pods
+    res.json({ status: 'ok' });
+});
+
+app.get('/health/readiness', (req, res) => {
+    // Kubernetes uses this to route traffic
+    if (db.isConnected() && cache.isConnected()) {
+        res.json({ status: 'ready' });
+    } else {
+        res.status(503).json({ status: 'not ready' });
+    }
+});</code></pre>
+            </div>
+
+            <button class="collapsible">The Versioning Nightmare</button>
+            <div class="collapsible-content">
+                <h3>Breaking API Changes</h3>
+                <p>
+                    Product Service v2.0 changes the response format. Order Service v1.0 expects the old format. Deploy breaks production.
+                </p>
+
+                <pre><code>// Old response (v1.0)
+{
+    "product_id": "123",
+    "price": 29.99,
+    "name": "Widget"
+}
+
+// New response (v2.0) - BREAKING CHANGE!
+{
+    "product_id": "123",
+    "pricing": {               // Changed structure
+        "base": 29.99,
+        "currency": "USD"
+    },
+    "name": "Widget"
+}
+
+// Order Service v1.0 breaks
+const price = response.price;  // undefined! Looking for response.pricing.base</code></pre>
+
+                <p>
+                    <strong>Solutions:</strong>
+                </p>
+
+                <h4>1. API Versioning</h4>
+                <pre><code>// Support multiple versions simultaneously
+GET /v1/products/123  → Returns old format
+GET /v2/products/123  → Returns new format
+
+// Migrate clients gradually
+// Deprecate v1 after 6 months
+
+// Implementation
+app.get('/v1/products/:id', async (req, res) => {
+    const product = await productService.get(req.params.id);
+    res.json(transformToV1Format(product));  // Transform to old format
+});
+
+app.get('/v2/products/:id', async (req, res) => {
+    const product = await productService.get(req.params.id);
+    res.json(product);  // New format
+});</code></pre>
+
+                <h4>2. Backwards Compatible Changes Only</h4>
+                <pre><code>// GOOD: Add new fields (backwards compatible)
+{
+    "product_id": "123",
+    "price": 29.99,           // Keep old field
+    "pricing": {              // Add new field
+        "base": 29.99,
+        "currency": "USD"
+    },
+    "name": "Widget"
+}
+
+// Old clients ignore new "pricing" field
+// New clients use "pricing", ignore "price"
+// Both work simultaneously</code></pre>
+
+                <h4>3. Consumer-Driven Contract Testing</h4>
+                <pre><code>// Product Service has a test for each consumer
+describe('Order Service contract', () => {
+    test('GET /products/:id returns expected format', async () => {
+        const response = await request(app).get('/products/123');
+
+        expect(response.body).toMatchObject({
+            product_id: expect.any(String),
+            price: expect.any(Number),
+            name: expect.any(String)
+        });
+    });
+});
+
+// If you change the response, this test fails
+// You know you'll break Order Service
+// Can't deploy until you fix it</code></pre>
 
                 <div class="info-box warning">
-                    <strong>Trade-off:</strong>
-                    Database per service adds complexity. Only use when benefits (scalability, independence) outweigh costs.
-                </div>
-            </div>
-
-            <button class="collapsible">Authentication & Authorization</button>
-            <div class="collapsible-content">
-                <h3>Common Approaches</h3>
-
-                <p><strong>1. Centralized Authentication (API Gateway)</strong></p>
-                <ul>
-                    <li>Gateway handles auth, passes user info to services</li>
-                    <li>Services trust the gateway</li>
-                    <li>Simple for services but single point of failure</li>
-                </ul>
-
-                <p><strong>2. Token-Based (JWT)</strong></p>
-                <ul>
-                    <li>Auth service issues JWT tokens</li>
-                    <li>Token contains user claims</li>
-                    <li>Services validate token independently</li>
-                    <li>No need to call auth service for every request</li>
-                </ul>
-
-                <pre><code>// JWT token flow
-1. Client -> Auth Service: Login credentials
-2. Auth Service -> Client: JWT token
-3. Client -> API Gateway: Request + JWT
-4. API Gateway -> Microservice: Request + JWT
-5. Microservice: Validates JWT and processes request</code></pre>
-
-                <p><strong>3. OAuth 2.0 / OpenID Connect</strong></p>
-                <ul>
-                    <li>Industry standard for authorization</li>
-                    <li>Supports third-party authentication (Google, GitHub, etc.)</li>
-                    <li>Access tokens with limited scope and expiration</li>
-                </ul>
-
-                <div class="info-box important">
-                    <strong>Best Practice:</strong>
-                    Use short-lived access tokens with refresh tokens. Implement token revocation for security.
+                    <strong>The Production Outage:</strong>
+                    We deployed Product Service v2.0 at 2 PM. Order Service started throwing errors. Checkout broke. We rolled back in 10 minutes, but 500 orders were lost. Now we require backward compatibility for at least 30 days, version all APIs, and run consumer contract tests in CI. Never again.
                 </div>
             </div>
         </section>
 
         <section class="content-section">
-            <h2>Common Patterns</h2>
+            <h2>Best Practices Checklist</h2>
 
-            <h3>Strangler Fig Pattern</h3>
-            <p>
-                Gradually migrate from monolith to microservices by replacing functionality piece by piece.
-                New features go to microservices, old ones stay in monolith until migrated.
-            </p>
+            <h3>Service Design</h3>
+            <pre><code>✓ Each service has a single, well-defined purpose
+✓ Services own their data (database per service)
+✓ Services communicate via well-defined APIs or events
+✓ Services can be deployed independently
+✓ Services are stateless (state in database/cache, not memory)
+✓ Services have separate repositories (or monorepo with clear boundaries)
+✓ Services have independent CI/CD pipelines</code></pre>
 
-            <h3>Bulkhead Pattern</h3>
-            <p>
-                Isolate resources (threads, connections, memory) for different services to prevent one failing
-                service from exhausting resources needed by others.
-            </p>
+            <h3>Communication</h3>
+            <pre><code>✓ Use sync calls (REST/gRPC) when you need immediate response
+✓ Use async events when you don't need immediate response
+✓ Implement circuit breakers for all external calls
+✓ Set reasonable timeouts (3-5 seconds for most APIs)
+✓ Use retries with exponential backoff
+✓ Implement idempotent endpoints (safe to retry)
+✓ Version your APIs (/v1/resource, /v2/resource)</code></pre>
 
-            <h3>Sidecar Pattern</h3>
-            <p>
-                Deploy helper components alongside your service in the same host/pod.
-                Common for logging, monitoring, service mesh (like Istio).
-            </p>
+            <h3>Data Management</h3>
+            <pre><code>✓ Each service has its own database
+✓ Use Saga pattern for distributed transactions
+✓ Replicate data via events when needed (eventual consistency)
+✓ Use CQRS for complex queries across services
+✓ Cache aggressively (with TTL and invalidation strategy)
+✓ Store events for audit trail (event sourcing)</code></pre>
 
-            <h3>Retry Pattern</h3>
-            <p>
-                Automatically retry failed requests with exponential backoff and jitter.
-                Essential for handling transient failures in distributed systems.
-            </p>
+            <h3>Observability</h3>
+            <pre><code>✓ Distributed tracing (trace ID through all services)
+✓ Structured logging (JSON, searchable fields)
+✓ Centralized log aggregation (ELK, CloudWatch, Datadog)
+✓ Metrics for RED (Request rate, Error rate, Duration)
+✓ Business metrics (orders/min, revenue, conversions)
+✓ Dashboards for each service and overall system
+✓ Alerts for SLO violations (P99 latency > 500ms, error rate > 1%)</code></pre>
 
-            <pre><code>// Exponential backoff with jitter
-initialDelay = 100ms
-maxRetries = 5
-
-for (attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-        return callService();
-    } catch (Exception e) {
-        delay = initialDelay * (2 ^ attempt) + random(0, 100);
-        sleep(delay);
-    }
-}</code></pre>
+            <h3>Deployment & Operations</h3>
+            <pre><code>✓ Kubernetes or similar orchestration platform
+✓ Service discovery (Kubernetes DNS or Consul)
+✓ API Gateway for external traffic
+✓ Service mesh for service-to-service (optional, for complex systems)
+✓ Zero-downtime deployments (rolling, blue/green, canary)
+✓ Feature flags for gradual rollouts
+✓ Automated rollback on failed health checks
+✓ Regular chaos engineering (kill random pods, test resilience)</code></pre>
         </section>
 
         <section class="content-section">
-            <h2>Observability</h2>
+            <h2>Key Takeaways</h2>
 
-            <h3>The Three Pillars</h3>
-
-            <p><strong>1. Logging</strong></p>
-            <ul>
-                <li>Centralized logging (ELK Stack, Splunk, CloudWatch)</li>
-                <li>Structured logging (JSON format)</li>
-                <li>Correlation IDs to trace requests across services</li>
-            </ul>
-
-            <p><strong>2. Metrics</strong></p>
-            <ul>
-                <li>System metrics (CPU, memory, disk)</li>
-                <li>Application metrics (request rate, latency, errors)</li>
-                <li>Business metrics (orders, signups, revenue)</li>
-                <li>Tools: Prometheus, Grafana, DataDog, New Relic</li>
-            </ul>
-
-            <p><strong>3. Distributed Tracing</strong></p>
-            <ul>
-                <li>Track requests as they flow through multiple services</li>
-                <li>Identify bottlenecks and failures</li>
-                <li>Tools: Jaeger, Zipkin, AWS X-Ray, OpenTelemetry</li>
-            </ul>
-
-            <div class="info-box tip">
-                <strong>Correlation ID:</strong>
-                Generate a unique ID for each request and pass it through all services. Makes debugging much easier.
-            </div>
-        </section>
-
-        <section class="content-section">
-            <h2>Deployment Strategies</h2>
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Strategy</th>
-                        <th>Description</th>
-                        <th>Risk</th>
-                        <th>Rollback</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>Rolling Update</td>
-                        <td>Gradually replace instances</td>
-                        <td>Medium</td>
-                        <td>Slow</td>
-                    </tr>
-                    <tr>
-                        <td>Blue-Green</td>
-                        <td>Two identical environments, switch traffic</td>
-                        <td>Low</td>
-                        <td>Instant</td>
-                    </tr>
-                    <tr>
-                        <td>Canary</td>
-                        <td>Deploy to small subset first</td>
-                        <td>Very Low</td>
-                        <td>Fast</td>
-                    </tr>
-                    <tr>
-                        <td>Feature Flags</td>
-                        <td>Deploy code, enable features selectively</td>
-                        <td>Very Low</td>
-                        <td>Instant</td>
-                    </tr>
-                </tbody>
-            </table>
-        </section>
-
-        <section class="content-section">
-            <h2>Key Decision Points</h2>
-
-            <button class="collapsible">Choosing Between Microservices and Monolith</button>
-            <div class="collapsible-content">
-                <p><strong>Microservices are suitable when:</strong></p>
-                <ul>
-                    <li>Large team that needs to work independently</li>
-                    <li>Different parts of system have different scaling needs</li>
-                    <li>Need to use different technologies for different components</li>
-                    <li>Frequent deployments and rapid iteration required</li>
-                    <li>System is complex with well-defined bounded contexts</li>
-                </ul>
-                <p><strong>Monolith is suitable when:</strong></p>
-                <ul>
-                    <li>Small team</li>
-                    <li>Simple application</li>
-                    <li>Starting a new product (validate first, then split if needed)</li>
-                    <li>Limited DevOps resources</li>
-                </ul>
+            <div class="info-box important">
+                <strong>If I could go back and give myself advice before my first microservices project:</strong>
             </div>
 
-            <button class="collapsible">Handling Distributed Transactions</button>
-            <div class="collapsible-content">
-                <p>Use the <strong>Saga Pattern</strong>:</p>
-                <ol>
-                    <li><strong>Choreography:</strong> Each service publishes events after completing its transaction. Other services listen and execute their transactions. If any fails, compensating transactions rollback changes.</li>
-                    <li><strong>Orchestration:</strong> A central orchestrator service coordinates the transaction across services. It tells each service what to do and handles rollbacks.</li>
-                </ol>
-                <p><strong>Example (Order Processing):</strong></p>
-                <pre><code>1. Order Service: Create order (pending)
-2. Payment Service: Reserve payment
-   - Success: Continue
-   - Failure: Cancel order
-3. Inventory Service: Reserve items
-   - Success: Continue
-   - Failure: Refund payment, cancel order
-4. Shipping Service: Create shipment
-   - Success: Complete order
-   - Failure: Return items, refund payment, cancel order</code></pre>
-            </div>
-
-            <button class="collapsible">Preventing Cascading Failures</button>
-            <div class="collapsible-content">
-                <p><strong>Resilience Strategies:</strong></p>
-                <ul>
-                    <li><strong>Circuit Breaker:</strong> Stop calling failing services</li>
-                    <li><strong>Timeouts:</strong> Don't wait forever for responses</li>
-                    <li><strong>Bulkhead:</strong> Isolate resources per service</li>
-                    <li><strong>Rate Limiting:</strong> Prevent overwhelming services</li>
-                    <li><strong>Graceful Degradation:</strong> Provide fallback responses</li>
-                    <li><strong>Health Checks:</strong> Remove unhealthy instances from load balancer</li>
-                    <li><strong>Retry with Backoff:</strong> Don't hammer failing services</li>
-                </ul>
-            </div>
-        </section>
-
-        <section class="content-section">
-            <h2>Best Practices</h2>
             <ol>
-                <li><strong>Design for Failure:</strong> Assume services will fail and design accordingly</li>
-                <li><strong>One Service, One Responsibility:</strong> Keep services focused and cohesive</li>
-                <li><strong>Decentralize:</strong> Avoid single points of failure</li>
-                <li><strong>Automate Everything:</strong> CI/CD, testing, deployment, monitoring</li>
-                <li><strong>API Versioning:</strong> Never break backward compatibility</li>
-                <li><strong>Idempotency:</strong> Make operations safe to retry</li>
-                <li><strong>Security:</strong> Encrypt in transit and at rest, authenticate all requests</li>
-                <li><strong>Document APIs:</strong> Use tools like Swagger/OpenAPI</li>
+                <li>
+                    <strong>Start with a monolith.</strong> Seriously. Build your product, validate it works, get some users. Then extract services when you feel pain. We spent 6 months building microservices for a product that pivoted 3 months later. Wasted effort. Premature optimization is real.
+                </li>
+                <li>
+                    <strong>Async over sync.</strong> Every synchronous call is a point of coupling and failure. Use events when you can. Order created? Publish event. Let interested services listen. When Payment Service is down, Order Service still works—payment queues and processes later. Resilience through decoupling.
+                </li>
+                <li>
+                    <strong>Observability is not optional.</strong> In a monolith, you can debug with breakpoints. In microservices, you need distributed tracing or you're blind. We spent weeks debugging issues we could've found in minutes with proper tracing. Invest in logging, metrics, and tracing from day one.
+                </li>
+                <li>
+                    <strong>Data consistency is hard.</strong> You can't JOIN across databases. You can't use transactions across services. Accept eventual consistency or use orchestrated sagas for critical flows. We tried to maintain strong consistency everywhere—it doesn't work. Pick your battles: checkout needs consistency, analytics can be eventual.
+                </li>
+                <li>
+                    <strong>Conway's Law is real.</strong> Your architecture mirrors your org structure. If you have one team, microservices add overhead without benefits. If you have 5 teams, microservices enable independent work. Align your architecture with your organization, not with what's trendy.
+                </li>
             </ol>
+
+            <p>
+                Microservices are a tool, not a goal. They trade monolith problems (deployment coupling, scaling limitations) for distributed system problems (network failures, data consistency, debugging complexity). Make that trade consciously, not because it's what everyone else is doing. And when you do go microservices, invest in the infrastructure: API gateway, service mesh, observability, deployment automation. Half-assed microservices are worse than a well-built monolith.
+            </p>
         </section>
 
         <section class="content-section">
             <h2>Additional Resources</h2>
             <ul>
-                <li><a href="https://microservices.io/" target="_blank">Microservices.io - Patterns Catalog</a></li>
-                <li><a href="https://martinfowler.com/microservices/" target="_blank">Martin Fowler - Microservices</a></li>
-                <li><a href="https://12factor.net/" target="_blank">The Twelve-Factor App</a></li>
-                <li><a href="https://www.nginx.com/blog/introduction-to-microservices/" target="_blank">NGINX - Introduction to Microservices</a></li>
+                <li><a href="https://microservices.io/patterns/index.html" target="_blank">Microservices Patterns by Chris Richardson</a></li>
+                <li><a href="https://martinfowler.com/articles/microservices.html" target="_blank">Martin Fowler on Microservices</a></li>
+                <li><a href="https://www.nginx.com/blog/introduction-to-microservices/" target="_blank">NGINX Introduction to Microservices</a></li>
+                <li><a href="https://kubernetes.io/docs/home/" target="_blank">Kubernetes Documentation</a></li>
+                <li><a href="https://istio.io/latest/docs/" target="_blank">Istio Service Mesh Documentation</a></li>
+                <li><a href="https://www.oreilly.com/library/view/building-microservices-2nd/9781492034018/" target="_blank">Building Microservices by Sam Newman</a></li>
             </ul>
+        </section>
+
+        <section class="content-section">
+            <h2>Related Topics</h2>
+            <div class="topics-grid">
+                <div class="topic-card">
+                    <h3>Apache Kafka</h3>
+                    <p>Learn about event-driven architecture and messaging patterns for microservices communication.</p>
+                    <a href="../kafka/index.html" class="btn">Learn More →</a>
+                </div>
+                <div class="topic-card">
+                    <h3>OAuth & OIDC</h3>
+                    <p>Understand authentication and authorization patterns for securing microservices APIs.</p>
+                    <a href="../oauth/index.html" class="btn">Learn More →</a>
+                </div>
+            </div>
         </section>
     </main>
 
